@@ -4,6 +4,7 @@ import sys
 import json
 import argparse
 import requests
+import time
 
 URL = "https://api.openai.com/v1/responses"
 
@@ -17,6 +18,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stop", action="append", default=None,
                    help="Stop sequence (can be repeated: --stop 'END' --stop '###')")
     p.add_argument("--json", action="store_true", help="Print raw JSON response")
+    p.add_argument("--timeout", type=int, default=60,
+                   help="HTTP timeout in seconds (default: 60)",
+)
     return p
 
 def read_prompt(args: argparse.Namespace) -> str:
@@ -57,15 +61,28 @@ def main() -> None:
     if args.stop:
         payload["stop"] = args.stop
 
-    r = requests.post(
-        URL,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=60,
-    )
+    retries = 3
+    delay = 2
+    
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.post(
+                URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=args.timeout,
+            )
+            break
+
+        except requests.exceptions.ReadTimeout:
+            if attempt == retries:
+                raise
+            print(f"Timeout, retry {attempt}/{retries}...", file=sys.stderr)
+            time.sleep(delay)
+            delay *= 2
 
     data = r.json()
     if args.json:
