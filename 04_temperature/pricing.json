@@ -1,0 +1,19 @@
+{
+  "currency": "USD",
+  "unit": "per_1M_tokens",
+  "tier": "standard",
+  "models": {
+    "gpt-5.2": { "input": 1.75, "cached": 0.175, "output": 14.0 },
+    "gpt-5.1": { "input": 1.25, "cached": 0.125, "output": 10.0 },
+    "gpt-5": { "input": 1.25, "cached": 0.125, "output": 10.0 },
+    "gpt-5-mini": { "input": 0.25, "cached": 0.025, "output": 2.0 },
+    "gpt-5-nano": { "input": 0.05, "cached": 0.005, "output": 0.4 },
+
+    "gpt-4.1": { "input": 2.0, "cached": 0.5, "output": 8.0 },
+    "gpt-4.1-mini": { "input": 0.4, "cached": 0.1, "output": 1.6 },
+    "gpt-4.1-nano": { "input": 0.1, "cached": 0.025, "output": 0.4 },
+
+    "gpt-4o": { "input": 2.5, "cached": 1.25, "output": 10.0 },
+    "gpt-4o-mini": { "input": 0.15, "cached": 0.075, "output": 0.6 }
+  }
+}
