@@ -246,8 +246,13 @@ class Agent:
 
         data, elapsed = self._post(payload)
 
-        if "error" in data:
-            raise RuntimeError(data["error"].get("message", "API error"))
+        if isinstance(data, dict) and data.get("error") is not None:
+            err = data.get("error") or {}
+            msg = err.get("message") if isinstance(err, dict) else str(err)
+            raise RuntimeError(msg or "API error")
+        
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Unexpected API response type: {type(data)}")
 
         if self.print_json:
             text = json.dumps(data, ensure_ascii=False, indent=2)
