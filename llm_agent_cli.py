@@ -141,8 +141,15 @@ def main():
         print_json=args.json,
     )
 
-    print("LLM Agent (TOON v3.0)")
-    print("Type /help\n")
+    # Auto-load state on startup (if file exists)
+    try:
+        if Path(args.state).exists():
+            agent.load_state(args.state)
+            print(f"OK: auto-loaded state from {args.state}")
+    except Exception as e:
+        print(f"WARNING: could not auto-load state: {e}", file=sys.stderr)
+    
+        print("LLM Agent (TOON v3.0). Type /help\n")
 
     while True:
         try:
@@ -204,11 +211,22 @@ def main():
         try:
             answer, metrics = agent.reply(text)
 
+            # Auto-save state after each successful turn
+            try:
+                agent.save_state(args.state)
+            except Exception as e:
+                print(f"WARNING: could not auto-save state: {e}", file=sys.stderr)
+
             print("\n" + answer + "\n")
             print_metrics(metrics)
 
         except Exception as e:
             print("ERROR:", e, file=sys.stderr)
+
+    try:
+        agent.save_state(args.state)
+    except Exception:
+        pass
 
     print("Bye.")
 
