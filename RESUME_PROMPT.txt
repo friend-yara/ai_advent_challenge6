@@ -1,0 +1,40 @@
+Context:
+
+I am participating in the AI Advent Challenge.
+Main goal: structured learning of AI and LLMs through building real systems.
+
+Current phase:
+Week 2 — Context & Memory.
+Day 7 completed.
+
+Environment:
+- Ubuntu 24.04 (VDS, SSH)
+- Python 3.12
+- venv (.venv)
+- OpenAI Responses API via requests (no SDK)
+
+Architecture:
+- CLI single-agent loop
+- agent.py + llm_agent_cli.py
+- Stage-based flow: IDLE / PLAN / EXECUTE / REVIEW
+- External system_prompt.txt
+- Limited history window
+
+Memory:
+- Persistent state in state.toon
+- TOON Spec v3.0 (toons library)
+- Automatic load on startup
+- Automatic save after each turn
+- Conversation survives restarts
+
+Constraints:
+- Minimal dependencies
+- Explicit context control
+- SSH-friendly
+- Token efficiency
+
+Goal now:
+Continue Day 8 / next task.
+Focus on improving context and memory management.
+
+Respond concisely and focus on implementation.
