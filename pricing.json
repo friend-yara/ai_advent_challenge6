@@ -14,6 +14,8 @@
     "gpt-4.1-nano": { "input": 0.1, "cached": 0.025, "output": 0.4 },
 
     "gpt-4o": { "input": 2.5, "cached": 1.25, "output": 10.0 },
-    "gpt-4o-mini": { "input": 0.15, "cached": 0.075, "output": 0.6 }
+    "gpt-4o-mini": { "input": 0.15, "cached": 0.075, "output": 0.6 },
+
+    "gpt-3.5-turbo": { "input": 0.5, "cached": 0.0, "output": 1.5 }
   }
 }
