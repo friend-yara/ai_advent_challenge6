@@ -43,30 +43,24 @@ from agent import Agent, load_pricing_models
 def load_system_prompt(path: str) -> str:
     """Load system prompt from file."""
     p = Path(path)
-
     if not p.exists():
         raise FileNotFoundError(p)
-
     return p.read_text(encoding="utf-8").strip()
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI arguments."""
     p = argparse.ArgumentParser("Stage-based LLM agent")
-
     p.add_argument("-m", "--model", default="gpt-4.1")
     p.add_argument("-t", "--temperature", type=float)
     p.add_argument("--max-output-tokens", type=int)
     p.add_argument("--stop", action="append")
     p.add_argument("--timeout", type=int, default=60)
     p.add_argument("--json", action="store_true")
-
     p.add_argument("--history-limit", type=int, default=12)
     p.add_argument("--state", default="state.toon")
-
     p.add_argument("--system-file", default="system_prompt.txt")
     p.add_argument("--system", help="Override system prompt")
-
     return p
 
 
@@ -75,35 +69,26 @@ def print_help():
     print(
         """
 Commands:
+  /exit    Exit the agent
+  /help    Show this help
+  /reset   Clear all state and history
+  /save    Save state to state.toon
+  /load    Load state from state.toon
+  /goal    Set high-level agent goal
+  /stage   Set stage: IDLE PLAN EXECUTE REVIEW
+  /system  Override system prompt temporarily
+  /show    Display current stage and goal
 
-  /exit              Exit the agent
-  /help              Show this help
-  /reset             Clear all state and history
-  /save              Save state to state.toon
-  /load              Load state from state.toon
-
-  /goal <text>       Set high-level agent goal
-  /stage <stage>     Set stage: IDLE PLAN EXECUTE REVIEW
-  /system <text>     Override system prompt temporarily
-  /show              Display current stage and goal
-
-
-System prompt file:
-  ./system_prompt.txt
-
+System prompt file: ./system_prompt.txt
 
 Example workflow:
-
   /goal Learn LLM fundamentals
   /stage PLAN
   Create a 5-step study plan
-
   /stage EXECUTE
   Start with step 1
-
   /stage REVIEW
   Review the result
-
   /save
 """
     )
@@ -112,7 +97,11 @@ Example workflow:
 def print_metrics(m: dict):
     """Print metrics."""
     print(f"\n@@@MODEL@@@ {m['model']}")
-    print(f"@@@M@@@ t={m['time']:.2f}s in={m['in']} out={m['out']} $={m['cost']}")
+    print(
+        f"@@@M@@@ t={m['time']:.2f}s in={m['in']} out={m['out']} "
+        f"user={m.get('user')} dialog={m.get('dialog')} "
+        f"sum_in={m.get('sum_in')} sum_out={m.get('sum_out')} sum$={m.get('sum_cost')} $={m['cost']}"
+    )
 
 
 def main():
@@ -148,8 +137,8 @@ def main():
             print(f"OK: auto-loaded state from {args.state}")
     except Exception as e:
         print(f"WARNING: could not auto-load state: {e}", file=sys.stderr)
-    
-        print("LLM Agent (TOON v3.0). Type /help\n")
+
+    print("LLM Agent (TOON v3.0). Type /help\n")
 
     while True:
         try:
@@ -161,50 +150,40 @@ def main():
             continue
 
         if text.startswith("/"):
-
             if text == "/exit":
                 break
-
             if text == "/help":
                 print_help()
                 continue
-
             if text == "/reset":
                 agent.reset()
                 print("OK: reset")
                 continue
-
             if text == "/save":
                 agent.save_state(args.state)
                 print("OK: saved")
                 continue
-
             if text == "/load":
                 agent.load_state(args.state)
                 print("OK: loaded")
                 continue
-
             if text.startswith("/goal "):
                 agent.set_goal(text[6:].strip())
                 print("OK: goal set")
                 continue
-
             if text.startswith("/stage "):
                 agent.set_stage(text[7:].strip())
                 print(f"OK: stage={agent.stage}")
                 continue
-
             if text.startswith("/system "):
                 agent.set_system_prompt(text[8:].strip())
                 print("OK: system overridden")
                 continue
-
             if text == "/show":
                 print("stage:", agent.stage)
                 print("goal:", agent.goal)
                 print("history:", len(agent.history))
                 continue
-
             print("Unknown command")
             continue
 
@@ -222,11 +201,10 @@ def main():
 
         except Exception as e:
             print("ERROR:", e, file=sys.stderr)
-
-    try:
-        agent.save_state(args.state)
-    except Exception:
-        pass
+            try:
+                agent.save_state(args.state)
+            except Exception:
+                pass
 
     print("Bye.")
 
