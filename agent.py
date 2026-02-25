@@ -28,6 +28,7 @@ def load_pricing_models(script_dir: Optional[Path] = None) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data.get("models", {}) or {}
     except Exception:
+        print(f"[WARN] pricing.json not found, cost calculation disabled")
         return {}
 
 
