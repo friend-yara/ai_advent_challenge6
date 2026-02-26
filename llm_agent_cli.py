@@ -51,16 +51,21 @@ def load_system_prompt(path: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI arguments."""
     p = argparse.ArgumentParser("Stage-based LLM agent")
+
     p.add_argument("-m", "--model", default="gpt-4.1")
     p.add_argument("-t", "--temperature", type=float)
     p.add_argument("--max-output-tokens", type=int)
     p.add_argument("--stop", action="append")
     p.add_argument("--timeout", type=int, default=60)
     p.add_argument("--json", action="store_true")
+
     p.add_argument("--history-limit", type=int, default=12)
+    p.add_argument("--disable-summary", action="store_true")
     p.add_argument("--state", default="state.toon")
+
     p.add_argument("--system-file", default="system_prompt.txt")
     p.add_argument("--system", help="Override system prompt")
+
     return p
 
 
@@ -79,7 +84,8 @@ Commands:
   /system  Override system prompt temporarily
   /show    Display current stage and goal
 
-System prompt file: ./system_prompt.txt
+System prompt file:
+  ./system_prompt.txt
 
 Example workflow:
   /goal Learn LLM fundamentals
@@ -97,11 +103,7 @@ Example workflow:
 def print_metrics(m: dict):
     """Print metrics."""
     print(f"\n@@@MODEL@@@ {m['model']}")
-    print(
-        f"@@@M@@@ t={m['time']:.2f}s in={m['in']} out={m['out']} "
-        f"user={m.get('user')} dialog={m.get('dialog')} "
-        f"sum_in={m.get('sum_in')} sum_out={m.get('sum_out')} sum$={m.get('sum_cost')} $={m['cost']}"
-    )
+    print(f"@@@M@@@ t={m['time']:.2f}s in={m['in']} out={m['out']} $={m['cost']}")
 
 
 def main():
@@ -128,6 +130,7 @@ def main():
         stop=args.stop,
         pricing=pricing,
         print_json=args.json,
+        enable_summary=(not args.disable_summary),
     )
 
     # Auto-load state on startup (if file exists)
@@ -138,7 +141,7 @@ def main():
     except Exception as e:
         print(f"WARNING: could not auto-load state: {e}", file=sys.stderr)
 
-    print("LLM Agent (TOON v3.0). Type /help\n")
+    print("LLM Agent (TOON v3.0).\nType /help\n")
 
     while True:
         try:
