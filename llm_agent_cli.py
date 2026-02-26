@@ -144,7 +144,7 @@ def main():
 
     session = None
     if PromptSession is not None:
-        session = PromptSession()
+        session = PromptSession(mouse_support=False)
 
     while True:
         try:
