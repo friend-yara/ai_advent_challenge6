@@ -4,3 +4,4 @@ idna==3.11
 requests==2.32.5
 toons==0.5.3
 urllib3==2.6.3
+prompt_toolkit==3.0.47

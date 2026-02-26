@@ -39,6 +39,14 @@ from pathlib import Path
 
 from agent import Agent, load_pricing_models
 
+# Optional multiline input (prompt_toolkit)
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.patch_stdout import patch_stdout
+except Exception:
+    PromptSession = None
+    patch_stdout = None
+
 
 def load_system_prompt(path: str) -> str:
     """Load system prompt from file."""
@@ -86,16 +94,6 @@ Commands:
 
 System prompt file:
   ./system_prompt.txt
-
-Example workflow:
-  /goal Learn LLM fundamentals
-  /stage PLAN
-  Create a 5-step study plan
-  /stage EXECUTE
-  Start with step 1
-  /stage REVIEW
-  Review the result
-  /save
 """
     )
 
@@ -141,11 +139,24 @@ def main():
     except Exception as e:
         print(f"WARNING: could not auto-load state: {e}", file=sys.stderr)
 
-    print("LLM Agent (TOON v3.0).\nType /help\n")
+    print("LLM Agent (TOON v3.0).")
+    print("Подсказка: Enter — новая строка, Esc+Enter — отправить, Ctrl+D — выход.\n")
+
+    session = None
+    if PromptSession is not None:
+        session = PromptSession()
 
     while True:
         try:
-            text = input("> ").strip()
+            if session is not None:
+                with patch_stdout():
+                    text = session.prompt(
+                        "> ",
+                        multiline=True,
+                        prompt_continuation="... ",
+                    ).strip()
+            else:
+                text = input("> ").strip()
         except (EOFError, KeyboardInterrupt):
             break
 
