@@ -229,18 +229,16 @@ class Agent:
             return (self.summary or "").strip()
 
     def _compress_history_if_needed(self):
-        """Keep last N messages as-is; compress older messages into summary."""
         if not self.enable_summary:
             return
         if not self.history_limit or self.history_limit <= 0:
             return
-
-        while len(self.history) > self.history_limit:
-            overflow = len(self.history) - self.history_limit
-            take = min(self.summary_chunk_size, overflow)
+    
+        overflow = len(self.history) - self.history_limit
+        if overflow >= self.summary_chunk_size:
+            take = self.summary_chunk_size
             chunk = self.history[:take]
-            if not chunk:
-                break
+    
             print("Сжатие истории...")
             self.summary = self._summarize_messages(chunk)
             del self.history[:take]
