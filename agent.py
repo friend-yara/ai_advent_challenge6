@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import copy
 import json
 import sys
 import time
@@ -107,8 +108,53 @@ class Agent:
         self.notes = []
         self.history = []
         self.facts: dict[str, str] = {}
+        self.current_branch: str = "main"
+        self.branches: dict[str, dict] = {"main": self._snapshot()}
 
     # ---------------- State management ----------------
+
+    def _snapshot(self) -> dict:
+        """Return a deep copy of current per-branch state."""
+        return {
+            "history": copy.deepcopy(self.history),
+            "facts": copy.deepcopy(self.facts),
+            "summary": self.summary,
+            "stage": self.stage,
+            "goal": self.goal,
+            "plan": copy.deepcopy(self.plan),
+            "actions": copy.deepcopy(self.actions),
+            "notes": copy.deepcopy(self.notes),
+        }
+
+    def _restore_snapshot(self, snap: dict):
+        """Replace live state from a branch snapshot."""
+        self.history = copy.deepcopy(snap.get("history", []))
+        self.facts = copy.deepcopy(snap.get("facts", {}))
+        self.summary = snap.get("summary", "")
+        self.stage = snap.get("stage", "IDLE")
+        self.goal = snap.get("goal", "")
+        self.plan = copy.deepcopy(snap.get("plan", []))
+        self.actions = copy.deepcopy(snap.get("actions", []))
+        self.notes = copy.deepcopy(snap.get("notes", []))
+
+    def checkpoint(self):
+        """Save current live state as a snapshot of the current branch."""
+        self.branches[self.current_branch] = self._snapshot()
+
+    def branch_create(self, name: str):
+        """Create a new branch from current state. Raises ValueError if name exists."""
+        if name in self.branches:
+            raise ValueError(f"Branch '{name}' already exists")
+        self.checkpoint()
+        self.branches[name] = self._snapshot()
+
+    def branch_switch(self, name: str):
+        """Switch to an existing branch, saving current state first."""
+        if name not in self.branches:
+            raise ValueError(f"Branch '{name}' does not exist")
+        self.checkpoint()
+        self.current_branch = name
+        self._restore_snapshot(self.branches[name])
 
     def reset(self):
         """Reset all state."""
@@ -120,6 +166,8 @@ class Agent:
         self.history = []
         self.summary = ""
         self.facts = {}
+        self.current_branch = "main"
+        self.branches = {"main": self._snapshot()}
 
     def set_goal(self, goal: str):
         """Set global goal."""
@@ -148,6 +196,8 @@ class Agent:
             "history": self.history,
             "summary": self.summary,
             "facts": self.facts,
+            "current_branch": self.current_branch,
+            "branches": self.branches,
         }
 
     def save_state(self, path: str):
@@ -167,6 +217,12 @@ class Agent:
         self.history = st.get("history", []) or []
         self.summary = st.get("summary", "") or ""
         self.facts = st.get("facts", {}) or {}
+        self.current_branch = st.get("current_branch", "main") or "main"
+        self.branches = st.get("branches", {}) or {}
+        # Migrate old state files that have no branches
+        if not self.branches:
+            self.branches = {"main": self._snapshot()}
+            self.current_branch = "main"
 
     # ---------------- Prompt building ----------------
     def _select_context_messages(self) -> list[dict]:
@@ -175,15 +231,11 @@ class Agent:
         Currently implemented:
           - window: Sliding Window (last N messages)
           - facts: Sliding Window + FACTS block (injected in _build_prompt)
-        Placeholders:
-          - branch: will be implemented later (fallback to window for now)
+          - branch: Sliding Window within the active branch (branches managed via CLI)
         """
         if not self.history_limit:
             return []
-        # Sliding Window (also used by facts strategy for recent turns)
-        if self.context_strategy in ("window", "facts"):
-            return self.history[-self.history_limit :]
-        # Future strategies: fallback to window until implemented
+        # All strategies use a sliding window over the active history
         return self.history[-self.history_limit :]
 
 

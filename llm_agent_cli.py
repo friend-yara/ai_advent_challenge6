@@ -87,15 +87,19 @@ def print_help():
     print(
         """
 Commands:
-  /exit    Exit the agent
-  /help    Show this help
-  /reset   Clear all state and history
-  /save    Save state to state.toon
-  /load    Load state from state.toon
-  /goal    Set high-level agent goal
-  /stage   Set stage: IDLE PLAN EXECUTE REVIEW
-  /system  Override system prompt temporarily
-  /show    Display current stage and goal
+  /exit                    Exit the agent
+  /help                    Show this help
+  /reset                   Clear all state and history
+  /save                    Save state to state.toon
+  /load                    Load state from state.toon
+  /goal                    Set high-level agent goal
+  /stage                   Set stage: IDLE PLAN EXECUTE REVIEW
+  /system                  Override system prompt temporarily
+  /show                    Display current state (one line)
+  /checkpoint              Save snapshot of current branch
+  /branch list             List all branches (* = active)
+  /branch create <name>    Create new branch from current state
+  /branch switch <name>    Switch to branch, saving current first
 
 System prompt file:
   ./system_prompt.txt
@@ -200,7 +204,33 @@ def main():
                 print("OK: system overridden")
                 continue
             if text == "/show":
-                print(f"stage={agent.stage}, goal={agent.goal}, history={len(agent.history)}, facts={len(agent.facts)}")
+                print(f"stage={agent.stage}, goal={agent.goal}, history={len(agent.history)}, facts={len(agent.facts)}, branch={agent.current_branch}")
+                continue
+            if text == "/checkpoint":
+                agent.checkpoint()
+                print(f"OK: checkpoint saved to branch '{agent.current_branch}'")
+                continue
+            if text.startswith("/branch"):
+                parts = text.split()
+                sub = parts[1] if len(parts) > 1 else ""
+                if sub == "list":
+                    for name in agent.branches:
+                        marker = "*" if name == agent.current_branch else " "
+                        print(f"  {marker} {name}")
+                elif sub == "create" and len(parts) == 3:
+                    try:
+                        agent.branch_create(parts[2])
+                        print(f"OK: branch '{parts[2]}' created")
+                    except ValueError as e:
+                        print(f"ERROR: {e}")
+                elif sub == "switch" and len(parts) == 3:
+                    try:
+                        agent.branch_switch(parts[2])
+                        print(f"OK: switched to branch '{agent.current_branch}'")
+                    except ValueError as e:
+                        print(f"ERROR: {e}")
+                else:
+                    print("Usage: /branch list | /branch create <name> | /branch switch <name>")
                 continue
             print("Unknown command")
             continue
