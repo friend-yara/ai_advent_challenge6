@@ -106,12 +106,9 @@ System prompt file:
 """
     )
 
-
 def print_metrics(m: dict):
     """Print metrics."""
-    print(f"\n@@@MODEL@@@ {m['model']}")
-    print(f"@@@M@@@ t={m['time']:.2f}s in={m['in']} out={m['out']} $={m['cost']}")
-
+    print(f" ({m['time']:.2f} s, in={m['in']}, out={m['out']}, cost={m['cost']})\n")
 
 def main():
     """Run REPL."""
@@ -149,7 +146,7 @@ def main():
     except Exception as e:
         print(f"WARNING: could not auto-load state: {e}", file=sys.stderr)
 
-    print(f"LLM Agent (TOON v3.0). strategy={agent.context_strategy}, history-limit={agent.history_limit}")
+    print(f"LLM Agent (TOON v3.0). Model={agent.model}, strategy={agent.context_strategy}, history-limit={agent.history_limit}")
     print("Подсказка: Enter — новая строка, Esc+Enter — отправить, Ctrl+D — выход.\n")
 
     session = None
@@ -244,7 +241,7 @@ def main():
             except Exception as e:
                 print(f"WARNING: could not auto-save state: {e}", file=sys.stderr)
 
-            print("\n" + answer + "\n")
+            print(answer, end="")
             print_metrics(metrics)
 
         except Exception as e:
