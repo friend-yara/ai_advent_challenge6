@@ -74,6 +74,7 @@ class Agent:
         stop: list[str] | None = None,
         pricing: dict | None = None,
         print_json: bool = False,
+        context_strategy: str = "window",
         context_summary: bool = False,
     ):
         """Initialize agent."""
@@ -82,6 +83,11 @@ class Agent:
         self.system_prompt = system_prompt
         self.history_limit = max(0, history_limit)
         self.timeout = timeout
+        self.context_strategy = (context_strategy or "window").strip().lower()
+        if self.context_strategy not in ("window", "facts", "branch"):
+            raise ValueError(
+                "Invalid context_strategy. Use: window | facts | branch"
+            )
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
         self.stop = stop or []
@@ -159,6 +165,22 @@ class Agent:
         self.summary = st.get("summary", "") or ""
 
     # ---------------- Prompt building ----------------
+    def _select_context_messages(self) -> list[dict]:
+        """
+        Select which messages to include in the prompt depending on context strategy.
+        Currently implemented:
+          - window: Sliding Window (last N messages)
+        Placeholders:
+          - facts, branch: will be implemented later (fallback to window for now)
+        """
+        if not self.history_limit:
+            return []
+        # Sliding Window
+        if self.context_strategy == "window":
+            return self.history[-self.history_limit :]
+        # Future strategies: fallback to window until implemented
+        return self.history[-self.history_limit :]
+
 
     def _build_prompt(self, user_text: str) -> str:
         """Build full prompt with state and history."""
@@ -179,7 +201,7 @@ class Agent:
             parts.append("\nSUMMARY:\n" + self.summary.strip())
 
         parts.append("\nDIALOG:")
-        recent = self.history[-self.history_limit :] if self.history_limit else []
+        recent = self._select_context_messages()
         for m in recent:
             role = m["role"]
             text = m["text"]

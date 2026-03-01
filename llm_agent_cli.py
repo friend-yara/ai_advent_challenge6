@@ -66,8 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stop", action="append")
     p.add_argument("--timeout", type=int, default=60)
     p.add_argument("--json", action="store_true")
-
-    p.add_argument("--history-limit", type=int, default=12)
+    # Day 10: context strategies (currently only 'window' is implemented)
+    p.add_argument(
+        "--context-strategy",
+        default="window",
+        choices=["window", "facts", "branch"],
+    )
+    p.add_argument("--history-limit", type=int, default=6)
     p.add_argument("--context-summary", action="store_true")
     p.add_argument("--state", default="state.toon")
 
@@ -122,6 +127,7 @@ def main():
         model=args.model,
         system_prompt=system_prompt,
         history_limit=args.history_limit,
+        context_strategy=args.context_strategy,
         timeout=args.timeout,
         temperature=args.temperature,
         max_output_tokens=args.max_output_tokens,
