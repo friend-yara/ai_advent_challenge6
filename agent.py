@@ -280,7 +280,6 @@ class Agent:
                 parts.append(f"User: {text}")
             else:
                 parts.append(f"Assistant: {text}")
-        parts.append(f"User: {user_text}")
         parts.append("Assistant:")
         return "\n".join(parts)
 
