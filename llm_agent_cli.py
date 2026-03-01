@@ -145,7 +145,7 @@ def main():
     except Exception as e:
         print(f"WARNING: could not auto-load state: {e}", file=sys.stderr)
 
-    print("LLM Agent (TOON v3.0).")
+    print(f"LLM Agent (TOON v3.0). strategy={agent.context_strategy}, history-limit={agent.history_limit}")
     print("Подсказка: Enter — новая строка, Esc+Enter — отправить, Ctrl+D — выход.\n")
 
     session = None
