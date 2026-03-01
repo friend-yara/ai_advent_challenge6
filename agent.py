@@ -106,6 +106,7 @@ class Agent:
         self.actions = []
         self.notes = []
         self.history = []
+        self.facts: dict[str, str] = {}
 
     # ---------------- State management ----------------
 
@@ -118,6 +119,7 @@ class Agent:
         self.notes = []
         self.history = []
         self.summary = ""
+        self.facts = {}
 
     def set_goal(self, goal: str):
         """Set global goal."""
@@ -145,6 +147,7 @@ class Agent:
             "notes": self.notes,
             "history": self.history,
             "summary": self.summary,
+            "facts": self.facts,
         }
 
     def save_state(self, path: str):
@@ -163,6 +166,7 @@ class Agent:
         self.notes = st.get("notes", []) or []
         self.history = st.get("history", []) or []
         self.summary = st.get("summary", "") or ""
+        self.facts = st.get("facts", {}) or {}
 
     # ---------------- Prompt building ----------------
     def _select_context_messages(self) -> list[dict]:
@@ -170,17 +174,28 @@ class Agent:
         Select which messages to include in the prompt depending on context strategy.
         Currently implemented:
           - window: Sliding Window (last N messages)
+          - facts: Sliding Window + FACTS block (injected in _build_prompt)
         Placeholders:
-          - facts, branch: will be implemented later (fallback to window for now)
+          - branch: will be implemented later (fallback to window for now)
         """
         if not self.history_limit:
             return []
-        # Sliding Window
-        if self.context_strategy == "window":
+        # Sliding Window (also used by facts strategy for recent turns)
+        if self.context_strategy in ("window", "facts"):
             return self.history[-self.history_limit :]
         # Future strategies: fallback to window until implemented
         return self.history[-self.history_limit :]
 
+
+    def _update_facts(self, user_text: str):
+        """Parse 'Key: Value' lines from user message and update facts store."""
+        for line in user_text.splitlines():
+            if ": " in line:
+                key, _, value = line.partition(": ")
+                key = key.strip()
+                value = value.strip()
+                if key:
+                    self.facts[key] = value
 
     def _build_prompt(self, user_text: str) -> str:
         """Build full prompt with state and history."""
@@ -199,6 +214,10 @@ class Agent:
 
         if self.context_summary and self.summary:
             parts.append("\nSUMMARY:\n" + self.summary.strip())
+
+        if self.context_strategy == "facts" and self.facts:
+            facts_lines = "\n".join(f"{k}={v}" for k, v in self.facts.items())
+            parts.append("\nFACTS:\n" + facts_lines)
 
         parts.append("\nDIALOG:")
         recent = self._select_context_messages()
@@ -297,6 +316,9 @@ class Agent:
     def reply(self, user_text: str):
         """Send user message to LLM and return reply + metrics."""
         self.history.append({"role": "user", "text": user_text})
+
+        if self.context_strategy == "facts":
+            self._update_facts(user_text)
 
         # Day 9: compress history before building prompt
         self._compress_history_if_needed()

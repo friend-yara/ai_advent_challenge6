@@ -203,6 +203,7 @@ def main():
                 print("stage:", agent.stage)
                 print("goal:", agent.goal)
                 print("history:", len(agent.history))
+                print("facts:", len(agent.facts))
                 continue
             print("Unknown command")
             continue
