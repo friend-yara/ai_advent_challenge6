@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
 
     p.add_argument("--history-limit", type=int, default=12)
-    p.add_argument("--disable-summary", action="store_true")
+    p.add_argument("--context-summary", action="store_true")
     p.add_argument("--state", default="state.toon")
 
     p.add_argument("--system-file", default="system_prompt.txt")
@@ -128,7 +128,7 @@ def main():
         stop=args.stop,
         pricing=pricing,
         print_json=args.json,
-        enable_summary=(not args.disable_summary),
+        context_summary=args.context_summary,
     )
 
     # Auto-load state on startup (if file exists)

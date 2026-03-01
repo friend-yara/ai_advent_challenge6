@@ -74,7 +74,7 @@ class Agent:
         stop: list[str] | None = None,
         pricing: dict | None = None,
         print_json: bool = False,
-        enable_summary: bool = True,
+        context_summary: bool = False,
     ):
         """Initialize agent."""
         self.api_key = api_key
@@ -89,7 +89,7 @@ class Agent:
         self.pricing = pricing or {}
 
         # Day 9: summary compression
-        self.enable_summary = enable_summary
+        self.context_summary = context_summary
         self.summary = ""
         self.summary_chunk_size = 10
 
@@ -175,7 +175,7 @@ class Agent:
         )
         parts.append("\nSTATE (TOON v3.0):\n" + state_toon.strip())
 
-        if self.enable_summary and self.summary:
+        if self.context_summary and self.summary:
             parts.append("\nSUMMARY:\n" + self.summary.strip())
 
         parts.append("\nDIALOG:")
@@ -229,7 +229,7 @@ class Agent:
             return (self.summary or "").strip()
 
     def _compress_history_if_needed(self):
-        if not self.enable_summary:
+        if not self.context_summary:
             return
         if not self.history_limit or self.history_limit <= 0:
             return
