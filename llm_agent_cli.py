@@ -95,10 +95,12 @@ Commands:
   /reset                   Clear all state and history
   /save                    Save state to state.toon
   /load                    Load state from state.toon
-  /goal                    Set high-level agent goal
-  /stage                   Set stage: IDLE PLAN EXECUTE REVIEW
+  /goal                    Set high-level agent goal (alias for /task)
+  /task <text>             Set task in working memory (TaskContext.task)
+  /stage <s>               Set stage (legacy: IDLE|PLAN|EXECUTE|REVIEW, with transition check)
+  /state <s>               Set TaskContext state: PLANNING|EXECUTION|VALIDATION|DONE
   /system                  Override system prompt temporarily
-  /show                    Display current state (one line)
+  /show                    Display working memory + STM (two lines)
   /checkpoint              Save snapshot of current branch
   /branch list             List all branches (* = active)
   /branch create <name>    Create new branch from current state
@@ -209,16 +211,33 @@ def main():
                 agent.set_goal(text[6:].strip())
                 print("OK: goal set")
                 continue
+            if text.startswith("/task "):
+                agent.tc.task = text[6:].strip()
+                print("OK: task set")
+                continue
             if text.startswith("/stage "):
-                agent.set_stage(text[7:].strip())
-                print(f"OK: stage={agent.stage}")
+                err = agent.set_stage(text[7:].strip())
+                if err:
+                    print(f"ERROR: {err}")
+                else:
+                    print(f"OK: stage={agent.stage}")
+                continue
+            if text.startswith("/state "):
+                err = agent.set_task_state(text[7:].strip())
+                if err:
+                    print(f"ERROR: {err}")
+                else:
+                    print(f"OK: state={agent.tc.state}")
                 continue
             if text.startswith("/system "):
                 agent.set_system_prompt(text[8:].strip())
                 print("OK: system overridden")
                 continue
             if text == "/show":
-                print(f"stage={agent.stage}, goal={agent.goal}, history={len(agent.stm.messages)}, facts={len(agent.facts)}, branch={agent.current_branch}")
+                tc = agent.tc
+                print(f"[working] task={tc.task!r}, state={tc.state}, step={tc.step}/{tc.total}, current={tc.current!r}")
+                summary_flag = "yes" if agent.stm.summary else "no"
+                print(f"[stm]     messages={len(agent.stm.messages)}, summary={summary_flag}, facts={len(agent.facts)}, branch={agent.current_branch}")
                 continue
             if text == "/checkpoint":
                 agent.checkpoint()

@@ -55,6 +55,82 @@ def compute_cost(pricing: dict, model: str, in_tok, out_tok):
     )
 
 
+# Allowed TaskContext state transitions
+TASK_TRANSITIONS: dict[str, list[str]] = {
+    "PLANNING":   ["EXECUTION", "DONE"],
+    "EXECUTION":  ["VALIDATION", "PLANNING", "DONE"],
+    "VALIDATION": ["PLANNING", "EXECUTION", "DONE"],
+    "DONE":       ["PLANNING"],
+}
+
+# Mapping from legacy stage names to TaskContext states
+_STAGE_ALIAS: dict[str, str] = {
+    "IDLE":    "PLANNING",
+    "PLAN":    "PLANNING",
+    "EXECUTE": "EXECUTION",
+    "REVIEW":  "VALIDATION",
+}
+
+
+class TaskContext:
+    """Working memory: current task data (state machine, plan, progress)."""
+
+    VALID_STATES = tuple(TASK_TRANSITIONS.keys())
+
+    def __init__(self):
+        """Initialize with blank task in PLANNING state."""
+        self.task: str = ""
+        self.state: str = "PLANNING"
+        self.step: int = 0
+        self.total: int = 0
+        self.plan: list[str] = []
+        self.done: list[str] = []
+        self.current: str = ""
+        # Backward-compat fields
+        self.actions: list[str] = []
+        self.notes: list[str] = []
+
+    def set_state(self, new_state: str) -> str | None:
+        """Transition to new_state. Returns None on success, error string on failure."""
+        new_state = new_state.upper()
+        if new_state not in TASK_TRANSITIONS:
+            return f"Invalid state '{new_state}'. Valid: {', '.join(TASK_TRANSITIONS)}"
+        allowed = TASK_TRANSITIONS.get(self.state, [])
+        if new_state not in allowed:
+            return (
+                f"Transition {self.state} → {new_state} not allowed. "
+                f"Allowed from {self.state}: {', '.join(allowed) or 'none'}"
+            )
+        self.state = new_state
+        return None
+
+    def to_dict(self) -> dict:
+        """Serialize to plain dict."""
+        return {
+            "task": self.task,
+            "state": self.state,
+            "step": self.step,
+            "total": self.total,
+            "plan": self.plan,
+            "done": self.done,
+            "current": self.current,
+            "actions": self.actions,
+            "notes": self.notes,
+        }
+
+    def from_dict(self, data: dict):
+        """Restore from plain dict."""
+        self.task = data.get("task", "") or ""
+        self.state = data.get("state", "PLANNING") or "PLANNING"
+        self.step = data.get("step", 0) or 0
+        self.total = data.get("total", 0) or 0
+        self.plan = data.get("plan", []) or []
+        self.done = data.get("done", []) or []
+        self.current = data.get("current", "") or ""
+        self.actions = data.get("actions", []) or []
+        self.notes = data.get("notes", []) or []
+
+
 class ShortTermMemory:
     """Short-term memory: current dialogue session only (messages + summary)."""
 
@@ -127,29 +203,69 @@ class Agent:
             summary_chunk_size=10,
         )
 
-        # Persistent state (working memory)
-        self.stage = "IDLE"
-        self.goal = ""
-        self.plan = []
-        self.actions = []
-        self.notes = []
+        # Day 11: working memory layer
+        self.tc = TaskContext()
+
+        # Persistent state (working memory — remaining fields)
         self.facts: dict[str, str] = {}
         self.current_branch: str = "main"
         self.branches: dict[str, dict] = {"main": self._snapshot()}
 
     # ---------------- State management ----------------
 
+    # Backward-compat properties delegating to TaskContext
+    @property
+    def stage(self) -> str:
+        """Current task state (delegates to tc.state)."""
+        return self.tc.state
+
+    @stage.setter
+    def stage(self, value: str):
+        self.tc.state = value
+
+    @property
+    def goal(self) -> str:
+        """Current task description (delegates to tc.task)."""
+        return self.tc.task
+
+    @goal.setter
+    def goal(self, value: str):
+        self.tc.task = value
+
+    @property
+    def plan(self) -> list:
+        """Current plan steps (delegates to tc.plan)."""
+        return self.tc.plan
+
+    @plan.setter
+    def plan(self, value: list):
+        self.tc.plan = value
+
+    @property
+    def actions(self) -> list:
+        """Completed actions (delegates to tc.actions)."""
+        return self.tc.actions
+
+    @actions.setter
+    def actions(self, value: list):
+        self.tc.actions = value
+
+    @property
+    def notes(self) -> list:
+        """Notes (delegates to tc.notes)."""
+        return self.tc.notes
+
+    @notes.setter
+    def notes(self, value: list):
+        self.tc.notes = value
+
     def _snapshot(self) -> dict:
         """Return a deep copy of current per-branch state (working + stm)."""
         return {
+            "tc": copy.deepcopy(self.tc.to_dict()),
             "history": copy.deepcopy(self.stm.messages),
             "summary": self.stm.summary,
             "facts": copy.deepcopy(self.facts),
-            "stage": self.stage,
-            "goal": self.goal,
-            "plan": copy.deepcopy(self.plan),
-            "actions": copy.deepcopy(self.actions),
-            "notes": copy.deepcopy(self.notes),
         }
 
     def _restore_snapshot(self, snap: dict):
@@ -157,11 +273,16 @@ class Agent:
         self.stm.messages = copy.deepcopy(snap.get("history", []))
         self.stm.summary = snap.get("summary", "")
         self.facts = copy.deepcopy(snap.get("facts", {}))
-        self.stage = snap.get("stage", "IDLE")
-        self.goal = snap.get("goal", "")
-        self.plan = copy.deepcopy(snap.get("plan", []))
-        self.actions = copy.deepcopy(snap.get("actions", []))
-        self.notes = copy.deepcopy(snap.get("notes", []))
+        if "tc" in snap:
+            self.tc.from_dict(snap["tc"])
+        else:
+            # Migrate old snapshot format
+            self.tc.task = snap.get("goal", "")
+            old_stage = snap.get("stage", "PLANNING")
+            self.tc.state = _STAGE_ALIAS.get(old_stage) or old_stage
+            self.tc.plan = copy.deepcopy(snap.get("plan", []))
+            self.tc.actions = copy.deepcopy(snap.get("actions", []))
+            self.tc.notes = copy.deepcopy(snap.get("notes", []))
 
     def checkpoint(self):
         """Save current live state as a snapshot of the current branch."""
@@ -184,11 +305,7 @@ class Agent:
 
     def reset(self):
         """Reset all state."""
-        self.stage = "IDLE"
-        self.goal = ""
-        self.plan = []
-        self.actions = []
-        self.notes = []
+        self.tc = TaskContext()
         self.stm.messages = []
         self.stm.summary = ""
         self.facts = {}
@@ -196,14 +313,17 @@ class Agent:
         self.branches = {"main": self._snapshot()}
 
     def set_goal(self, goal: str):
-        """Set global goal."""
-        self.goal = goal
+        """Set task description (delegates to tc.task)."""
+        self.tc.task = goal
 
-    def set_stage(self, stage: str):
-        """Set current stage."""
-        if stage not in ("IDLE", "PLAN", "EXECUTE", "REVIEW"):
-            raise ValueError("Invalid stage")
-        self.stage = stage
+    def set_task_state(self, state: str) -> str | None:
+        """Set TaskContext state with transition validation. Returns error string or None."""
+        return self.tc.set_state(state.upper())
+
+    def set_stage(self, stage: str) -> str | None:
+        """Set stage with legacy alias support and transition validation. Returns error string or None."""
+        mapped = _STAGE_ALIAS.get(stage.upper(), stage.upper())
+        return self.tc.set_state(mapped)
 
     def set_system_prompt(self, text: str):
         """Override system prompt."""
@@ -212,13 +332,9 @@ class Agent:
     # ---------------- Persistence ----------------
 
     def _state_dict(self) -> dict:
-        """Return working state as dict (no dialogue history or summary)."""
+        """Return working state as dict (TaskContext + facts + branches, no dialogue)."""
         return {
-            "stage": self.stage,
-            "goal": self.goal,
-            "plan": self.plan,
-            "actions": self.actions,
-            "notes": self.notes,
+            "tc": self.tc.to_dict(),
             "facts": self.facts,
             "current_branch": self.current_branch,
             "branches": self.branches,
@@ -244,11 +360,16 @@ class Agent:
         """Load working state from TOON file."""
         with open(path, "r", encoding="utf-8") as f:
             st = toons.load(f)
-        self.stage = st.get("stage", "IDLE")
-        self.goal = st.get("goal", "")
-        self.plan = st.get("plan", []) or []
-        self.actions = st.get("actions", []) or []
-        self.notes = st.get("notes", []) or []
+        if "tc" in st:
+            self.tc.from_dict(st["tc"])
+        else:
+            # Migrate old flat format (stage/goal/plan/actions/notes)
+            self.tc.task = st.get("goal", "")
+            old_stage = st.get("stage", "PLANNING")
+            self.tc.state = _STAGE_ALIAS.get(old_stage) or old_stage
+            self.tc.plan = st.get("plan", []) or []
+            self.tc.actions = st.get("actions", []) or []
+            self.tc.notes = st.get("notes", []) or []
         self.facts = st.get("facts", {}) or {}
         self.current_branch = st.get("current_branch", "main") or "main"
         self.branches = st.get("branches", {}) or {}
@@ -286,16 +407,15 @@ class Agent:
         """Build full prompt with state and history."""
         parts = []
         parts.append("SYSTEM:\n" + self.system_prompt.strip())
-        state_toon = toons.dumps(
-            {
-                "stage": self.stage,
-                "goal": self.goal,
-                "plan": self.plan,
-                "actions": self.actions,
-                "notes": self.notes,
-            }
-        )
-        parts.append("\nSTATE (TOON v3.0):\n" + state_toon.strip())
+        parts.append("\nSTATE (TOON v3.0):\n" + toons.dumps(self.tc.to_dict()).strip())
+
+        if self.tc.current:
+            parts.append(
+                "\nRULES:\n"
+                f"- Work only within the current step: {self.tc.current}\n"
+                "- Do not skip steps\n"
+                "- When step is complete, signal next_step"
+            )
 
         if self.context_summary and self.stm.summary:
             parts.append("\nSUMMARY:\n" + self.stm.summary.strip())
