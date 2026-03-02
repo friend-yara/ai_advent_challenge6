@@ -37,7 +37,7 @@ import sys
 import argparse
 from pathlib import Path
 
-from agent import Agent, load_pricing_models
+from agent import Agent, LongTermMemory, load_pricing_models
 
 # Optional multiline input (prompt_toolkit)
 try:
@@ -82,6 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--system-file", default="system_prompt.txt")
     p.add_argument("--system", help="Override system prompt")
 
+    # Day 11: long-term memory
+    p.add_argument("--project-memory-file", default="PROJECT_MEMORY.md")
+    p.add_argument("--profile-file", default="PROFILE.md")
+    p.add_argument("--invariants-file", default="INVARIANTS.md")
+    p.add_argument("--use-project-memory", action="store_true")
+    p.add_argument("--use-profile", action="store_true")
+    p.add_argument("--use-invariants", action="store_true")
+
     return p
 
 
@@ -105,11 +113,18 @@ Commands:
   /branch list             List all branches (* = active)
   /branch create <name>    Create new branch from current state
   /branch switch <name>    Switch to branch, saving current first
+  /ltm reload              Reload LTM files from disk without restarting
 
 Flags:
-  --short-term-file        Path to short-term memory file (default: short_term.toon)
+  --short-term-file          Path to short-term memory file (default: short_term.toon)
   --no-auto-load-short-term  Skip loading short_term.toon at startup
   --no-auto-save-short-term  Skip saving short_term.toon after each turn
+  --project-memory-file      Path to project memory file (default: PROJECT_MEMORY.md)
+  --profile-file             Path to profile file (default: PROFILE.md)
+  --invariants-file          Path to invariants file (default: INVARIANTS.md)
+  --use-project-memory       Inject PROJECT_MEMORY into prompt
+  --use-profile              Inject PROFILE into prompt
+  --use-invariants           Inject INVARIANTS into prompt
 
 System prompt file:
   ./system_prompt.txt
@@ -133,6 +148,17 @@ def main():
     base_prompt = load_system_prompt(args.system_file)
     system_prompt = args.system if args.system else base_prompt
 
+    # Build and load long-term memory
+    ltm = LongTermMemory(
+        project_memory_file=args.project_memory_file,
+        profile_file=args.profile_file,
+        invariants_file=args.invariants_file,
+        use_project_memory=args.use_project_memory,
+        use_profile=args.use_profile,
+        use_invariants=args.use_invariants,
+    )
+    ltm.load()
+
     agent = Agent(
         api_key=api_key,
         model=args.model,
@@ -146,6 +172,7 @@ def main():
         pricing=pricing,
         print_json=args.json,
         context_summary=args.context_summary,
+        ltm=ltm,
     )
 
     # Auto-load working state on startup (if file exists)
@@ -238,10 +265,15 @@ def main():
                 print(f"[working] task={tc.task!r}, state={tc.state}, step={tc.step}/{tc.total}, current={tc.current!r}")
                 summary_flag = "yes" if agent.stm.summary else "no"
                 print(f"[stm]     messages={len(agent.stm.messages)}, summary={summary_flag}, facts={len(agent.facts)}, branch={agent.current_branch}")
+                print(f"[ltm]     {agent.ltm.summary_line()}")
                 continue
             if text == "/checkpoint":
                 agent.checkpoint()
                 print(f"OK: checkpoint saved to branch '{agent.current_branch}'")
+                continue
+            if text == "/ltm reload":
+                agent.ltm.reload()
+                print(f"OK: LTM reloaded — {agent.ltm.summary_line()}")
                 continue
             if text.startswith("/branch"):
                 parts = text.split()

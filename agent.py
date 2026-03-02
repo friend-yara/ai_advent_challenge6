@@ -72,6 +72,93 @@ _STAGE_ALIAS: dict[str, str] = {
 }
 
 
+class LongTermMemory:
+    """
+    Long-term memory: profile, invariants, project context.
+    Loaded from md/txt files; never saved to state.toon or short_term.toon.
+    Cached in process memory; reloaded on demand via reload().
+    """
+
+    def __init__(
+        self,
+        project_memory_file: str = "PROJECT_MEMORY.md",
+        profile_file: str = "PROFILE.md",
+        invariants_file: str = "INVARIANTS.md",
+        use_project_memory: bool = False,
+        use_profile: bool = False,
+        use_invariants: bool = False,
+    ):
+        """Initialize LTM with file paths and injection flags."""
+        self.project_memory_file = project_memory_file
+        self.profile_file = profile_file
+        self.invariants_file = invariants_file
+        self.use_project_memory = use_project_memory
+        self.use_profile = use_profile
+        self.use_invariants = use_invariants
+
+        # Cached content (None = not loaded yet)
+        self.project_memory: str | None = None
+        self.profile: str | None = None
+        self.invariants: str | None = None
+
+    def _read_file(self, path: str) -> str | None:
+        """Read a text file, returning None with a warning if missing."""
+        p = Path(path)
+        if not p.exists():
+            print(f"[WARN] LTM file not found: {path}", file=sys.stderr)
+            return None
+        try:
+            return p.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            print(f"[WARN] Could not read LTM file {path}: {e}", file=sys.stderr)
+            return None
+
+    def load(self):
+        """Load all enabled LTM files into cache."""
+        if self.use_project_memory:
+            self.project_memory = self._read_file(self.project_memory_file)
+        if self.use_profile:
+            self.profile = self._read_file(self.profile_file)
+        if self.use_invariants:
+            self.invariants = self._read_file(self.invariants_file)
+
+    def reload(self):
+        """Re-read LTM files from disk (clears cache first)."""
+        self.project_memory = None
+        self.profile = None
+        self.invariants = None
+        self.load()
+
+    def blocks(self, task_state: str) -> list[tuple[str, str]]:
+        """
+        Return list of (block_name, content) to inject into the prompt.
+        Injection rules:
+          - PROFILE: always, if loaded
+          - PROJECT_MEMORY: always, if loaded
+          - INVARIANTS: always if loaded; mandatory when task_state == EXECUTION
+        Returns only non-empty blocks.
+        """
+        result = []
+        if self.use_profile and self.profile:
+            result.append(("PROFILE", self.profile))
+        if self.use_project_memory and self.project_memory:
+            result.append(("PROJECT_MEMORY", self.project_memory))
+        if self.use_invariants and self.invariants:
+            result.append(("INVARIANTS", self.invariants))
+        return result
+
+    def summary_line(self) -> str:
+        """One-line status for /show."""
+        parts = []
+        if self.use_project_memory:
+            parts.append(f"project={'yes' if self.project_memory else 'not loaded'}")
+        if self.use_profile:
+            parts.append(f"profile={'yes' if self.profile else 'not loaded'}")
+        if self.use_invariants:
+            parts.append(f"invariants={'yes' if self.invariants else 'not loaded'}")
+        return ", ".join(parts) if parts else "disabled"
+
+
 class TaskContext:
     """Working memory: current task data (state machine, plan, progress)."""
 
@@ -176,6 +263,7 @@ class Agent:
         print_json: bool = False,
         context_strategy: str = "window",
         context_summary: bool = False,
+        ltm: "LongTermMemory | None" = None,
     ):
         """Initialize agent."""
         self.api_key = api_key
@@ -196,6 +284,9 @@ class Agent:
 
         # Day 9: summary compression flag (config, not state)
         self.context_summary = context_summary
+
+        # Day 11: long-term memory layer (loaded externally, injected on demand)
+        self.ltm: LongTermMemory = ltm or LongTermMemory()
 
         # Day 11: short-term memory layer
         self.stm = ShortTermMemory(
@@ -407,6 +498,11 @@ class Agent:
         """Build full prompt with state and history."""
         parts = []
         parts.append("SYSTEM:\n" + self.system_prompt.strip())
+
+        # Long-term memory blocks (injected before STATE, after SYSTEM)
+        for block_name, content in self.ltm.blocks(self.tc.state):
+            parts.append(f"\n{block_name}:\n{content}")
+
         parts.append("\nSTATE (TOON v3.0):\n" + toons.dumps(self.tc.to_dict()).strip())
 
         if self.tc.current:
