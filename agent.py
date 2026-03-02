@@ -55,6 +55,29 @@ def compute_cost(pricing: dict, model: str, in_tok, out_tok):
     )
 
 
+class ShortTermMemory:
+    """Short-term memory: current dialogue session only (messages + summary)."""
+
+    def __init__(self, history_limit: int, summary_chunk_size: int):
+        """Initialize with empty messages and summary."""
+        self.messages: list[dict] = []
+        self.summary: str = ""
+        self.history_limit: int = history_limit
+        self.summary_chunk_size: int = summary_chunk_size
+
+    def to_dict(self) -> dict:
+        """Serialize to plain dict for TOON persistence."""
+        return {
+            "messages": self.messages,
+            "summary": self.summary,
+        }
+
+    def from_dict(self, data: dict):
+        """Restore from plain dict."""
+        self.messages = data.get("messages", []) or []
+        self.summary = data.get("summary", "") or ""
+
+
 class Agent:
     """
     Minimal LLM agent with:
@@ -95,18 +118,21 @@ class Agent:
         self.print_json = print_json
         self.pricing = pricing or {}
 
-        # Day 9: summary compression
+        # Day 9: summary compression flag (config, not state)
         self.context_summary = context_summary
-        self.summary = ""
-        self.summary_chunk_size = 10
 
-        # Persistent state
+        # Day 11: short-term memory layer
+        self.stm = ShortTermMemory(
+            history_limit=self.history_limit,
+            summary_chunk_size=10,
+        )
+
+        # Persistent state (working memory)
         self.stage = "IDLE"
         self.goal = ""
         self.plan = []
         self.actions = []
         self.notes = []
-        self.history = []
         self.facts: dict[str, str] = {}
         self.current_branch: str = "main"
         self.branches: dict[str, dict] = {"main": self._snapshot()}
@@ -114,11 +140,11 @@ class Agent:
     # ---------------- State management ----------------
 
     def _snapshot(self) -> dict:
-        """Return a deep copy of current per-branch state."""
+        """Return a deep copy of current per-branch state (working + stm)."""
         return {
-            "history": copy.deepcopy(self.history),
+            "history": copy.deepcopy(self.stm.messages),
+            "summary": self.stm.summary,
             "facts": copy.deepcopy(self.facts),
-            "summary": self.summary,
             "stage": self.stage,
             "goal": self.goal,
             "plan": copy.deepcopy(self.plan),
@@ -128,9 +154,9 @@ class Agent:
 
     def _restore_snapshot(self, snap: dict):
         """Replace live state from a branch snapshot."""
-        self.history = copy.deepcopy(snap.get("history", []))
+        self.stm.messages = copy.deepcopy(snap.get("history", []))
+        self.stm.summary = snap.get("summary", "")
         self.facts = copy.deepcopy(snap.get("facts", {}))
-        self.summary = snap.get("summary", "")
         self.stage = snap.get("stage", "IDLE")
         self.goal = snap.get("goal", "")
         self.plan = copy.deepcopy(snap.get("plan", []))
@@ -163,8 +189,8 @@ class Agent:
         self.plan = []
         self.actions = []
         self.notes = []
-        self.history = []
-        self.summary = ""
+        self.stm.messages = []
+        self.stm.summary = ""
         self.facts = {}
         self.current_branch = "main"
         self.branches = {"main": self._snapshot()}
@@ -186,27 +212,36 @@ class Agent:
     # ---------------- Persistence ----------------
 
     def _state_dict(self) -> dict:
-        """Return full state as dict."""
+        """Return working state as dict (no dialogue history or summary)."""
         return {
             "stage": self.stage,
             "goal": self.goal,
             "plan": self.plan,
             "actions": self.actions,
             "notes": self.notes,
-            "history": self.history,
-            "summary": self.summary,
             "facts": self.facts,
             "current_branch": self.current_branch,
             "branches": self.branches,
         }
 
     def save_state(self, path: str):
-        """Save state to TOON file."""
+        """Save working state to TOON file."""
         with open(path, "w", encoding="utf-8") as f:
             toons.dump(self._state_dict(), f)
 
+    def save_short_term(self, path: str):
+        """Save short-term memory to a separate TOON file."""
+        with open(path, "w", encoding="utf-8") as f:
+            toons.dump(self.stm.to_dict(), f)
+
+    def load_short_term(self, path: str):
+        """Load short-term memory from a separate TOON file."""
+        with open(path, "r", encoding="utf-8") as f:
+            data = toons.load(f)
+        self.stm.from_dict(data)
+
     def load_state(self, path: str):
-        """Load state from TOON file."""
+        """Load working state from TOON file."""
         with open(path, "r", encoding="utf-8") as f:
             st = toons.load(f)
         self.stage = st.get("stage", "IDLE")
@@ -214,8 +249,6 @@ class Agent:
         self.plan = st.get("plan", []) or []
         self.actions = st.get("actions", []) or []
         self.notes = st.get("notes", []) or []
-        self.history = st.get("history", []) or []
-        self.summary = st.get("summary", "") or ""
         self.facts = st.get("facts", {}) or {}
         self.current_branch = st.get("current_branch", "main") or "main"
         self.branches = st.get("branches", {}) or {}
@@ -235,8 +268,8 @@ class Agent:
         """
         if not self.history_limit:
             return []
-        # All strategies use a sliding window over the active history
-        return self.history[-self.history_limit :]
+        # All strategies use a sliding window over the active short-term messages
+        return self.stm.messages[-self.history_limit:]
 
 
     def _update_facts(self, user_text: str):
@@ -264,8 +297,8 @@ class Agent:
         )
         parts.append("\nSTATE (TOON v3.0):\n" + state_toon.strip())
 
-        if self.context_summary and self.summary:
-            parts.append("\nSUMMARY:\n" + self.summary.strip())
+        if self.context_summary and self.stm.summary:
+            parts.append("\nSUMMARY:\n" + self.stm.summary.strip())
 
         if self.context_strategy == "facts" and self.facts:
             facts_lines = "\n".join(f"{k}={v}" for k, v in self.facts.items())
@@ -296,7 +329,7 @@ class Agent:
             "- сохранить факты, цели, решения, договорённости, требования\n"
             "- без воды, без выдумок\n\n"
             "Текущее summary (может быть пустым):\n"
-            f"{self.summary}\n\n"
+            f"{self.stm.summary}\n\n"
             "Новый фрагмент диалога:\n"
             f"{chunk}\n\n"
             "Верни ТОЛЬКО обновлённое summary:"
@@ -318,22 +351,22 @@ class Agent:
         try:
             return data["output"][0]["content"][0]["text"].strip()
         except Exception:
-            return (self.summary or "").strip()
+            return (self.stm.summary or "").strip()
 
     def _compress_history_if_needed(self):
         if not self.context_summary:
             return
         if not self.history_limit or self.history_limit <= 0:
             return
-    
-        overflow = len(self.history) - self.history_limit
-        if overflow >= self.summary_chunk_size:
-            take = self.summary_chunk_size
-            chunk = self.history[:take]
-    
+
+        overflow = len(self.stm.messages) - self.history_limit
+        if overflow >= self.stm.summary_chunk_size:
+            take = self.stm.summary_chunk_size
+            chunk = self.stm.messages[:take]
+
             print("Сжатие истории...")
-            self.summary = self._summarize_messages(chunk)
-            del self.history[:take]
+            self.stm.summary = self._summarize_messages(chunk)
+            del self.stm.messages[:take]
 
     # ---------------- API call ----------------
 
@@ -366,7 +399,7 @@ class Agent:
 
     def reply(self, user_text: str):
         """Send user message to LLM and return reply + metrics."""
-        self.history.append({"role": "user", "text": user_text})
+        self.stm.messages.append({"role": "user", "text": user_text})
 
         if self.context_strategy == "facts":
             self._update_facts(user_text)
@@ -405,7 +438,7 @@ class Agent:
             except Exception:
                 text = json.dumps(data, ensure_ascii=False, indent=2)
 
-        self.history.append({"role": "assistant", "text": text})
+        self.stm.messages.append({"role": "assistant", "text": text})
 
         usage = data.get("usage", {})
 

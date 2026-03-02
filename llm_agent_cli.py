@@ -75,6 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--history-limit", type=int, default=6)
     p.add_argument("--context-summary", action="store_true")
     p.add_argument("--state", default="state.toon")
+    p.add_argument("--short-term-file", default="short_term.toon")
+    p.add_argument("--no-auto-load-short-term", action="store_true")
+    p.add_argument("--no-auto-save-short-term", action="store_true")
 
     p.add_argument("--system-file", default="system_prompt.txt")
     p.add_argument("--system", help="Override system prompt")
@@ -100,6 +103,11 @@ Commands:
   /branch list             List all branches (* = active)
   /branch create <name>    Create new branch from current state
   /branch switch <name>    Switch to branch, saving current first
+
+Flags:
+  --short-term-file        Path to short-term memory file (default: short_term.toon)
+  --no-auto-load-short-term  Skip loading short_term.toon at startup
+  --no-auto-save-short-term  Skip saving short_term.toon after each turn
 
 System prompt file:
   ./system_prompt.txt
@@ -138,13 +146,22 @@ def main():
         context_summary=args.context_summary,
     )
 
-    # Auto-load state on startup (if file exists)
+    # Auto-load working state on startup (if file exists)
     try:
         if Path(args.state).exists():
             agent.load_state(args.state)
             print(f"OK: auto-loaded state from {args.state}")
     except Exception as e:
         print(f"WARNING: could not auto-load state: {e}", file=sys.stderr)
+
+    # Auto-load short-term memory on startup (if file exists and not disabled)
+    if not args.no_auto_load_short_term:
+        try:
+            if Path(args.short_term_file).exists():
+                agent.load_short_term(args.short_term_file)
+                print(f"OK: auto-loaded short-term from {args.short_term_file}")
+        except Exception as e:
+            print(f"WARNING: could not auto-load short-term: {e}", file=sys.stderr)
 
     print(f"LLM Agent (TOON v3.0). Model={agent.model}, strategy={agent.context_strategy}, history-limit={agent.history_limit}")
     print("Подсказка: Enter — новая строка, Esc+Enter — отправить, Ctrl+D — выход.\n")
@@ -201,7 +218,7 @@ def main():
                 print("OK: system overridden")
                 continue
             if text == "/show":
-                print(f"stage={agent.stage}, goal={agent.goal}, history={len(agent.history)}, facts={len(agent.facts)}, branch={agent.current_branch}")
+                print(f"stage={agent.stage}, goal={agent.goal}, history={len(agent.stm.messages)}, facts={len(agent.facts)}, branch={agent.current_branch}")
                 continue
             if text == "/checkpoint":
                 agent.checkpoint()
@@ -235,11 +252,18 @@ def main():
         try:
             answer, metrics = agent.reply(text)
 
-            # Auto-save state after each successful turn
+            # Auto-save working state after each successful turn
             try:
                 agent.save_state(args.state)
             except Exception as e:
                 print(f"WARNING: could not auto-save state: {e}", file=sys.stderr)
+
+            # Auto-save short-term memory after each successful turn
+            if not args.no_auto_save_short_term:
+                try:
+                    agent.save_short_term(args.short_term_file)
+                except Exception as e:
+                    print(f"WARNING: could not auto-save short-term: {e}", file=sys.stderr)
 
             print(answer, end="")
             print_metrics(metrics)
