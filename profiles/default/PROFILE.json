@@ -39,7 +39,9 @@
       "name": "Alexey",
       "role": "developer",
       "environment": "SSH terminal, remote VDS",
-      "experience": "Familiar with Python, CLI tools, and Linux"
+      "experience": "Familiar with Python, CLI tools, and Linux",
+      "domain_focus": "programming only",
+      "domain_note": "User is interested exclusively in software development and programming topics. Other domains (medicine, law, finance, etc.) are outside the user's expertise and interest — do not engage with them."
     }
   },
   "prompt_injection": {
