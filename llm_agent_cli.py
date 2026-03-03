@@ -74,8 +74,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--history-limit", type=int, default=6)
     p.add_argument("--context-summary", action="store_true")
-    p.add_argument("--state", default="state.toon")
-    p.add_argument("--short-term-file", default="short_term.toon")
+    p.add_argument("--state", default="profiles/default/state.toon")
+    p.add_argument("--short-term-file", default="profiles/default/short_term.toon")
     p.add_argument("--no-auto-load-short-term", action="store_true")
     p.add_argument("--no-auto-save-short-term", action="store_true")
 
