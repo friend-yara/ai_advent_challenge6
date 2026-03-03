@@ -9,6 +9,14 @@ from typing import Optional
 import requests
 
 try:
+    import yaml
+except ImportError as e:
+    raise SystemExit(
+        "ERROR: Install YAML support:\n"
+        "  pip install pyyaml"
+    ) from e
+
+try:
     import toons
 except ImportError as e:
     raise SystemExit(
@@ -72,6 +80,77 @@ _STAGE_ALIAS: dict[str, str] = {
 }
 
 
+class Profile:
+    """
+    User profile loaded from a JSON file.
+    Sections style/constraints/context are rendered as YAML for prompt injection.
+    Injection is controlled by the prompt_injection section in the JSON.
+    """
+
+    # Sections excluded from YAML rendering (internal/meta)
+    _EXCLUDED_SECTIONS = ("meta", "prompt_injection")
+
+    def __init__(self, path: str):
+        """Initialize profile with file path. Empty path disables the profile."""
+        self.path = path
+        self.data: dict = {}
+        self._loaded: bool = False
+
+    def load(self) -> str | None:
+        """Read and parse the JSON file. Returns error string or None on success."""
+        if not self.path:
+            return None
+        p = Path(self.path)
+        if not p.exists():
+            return f"Profile file not found: {self.path}"
+        try:
+            self.data = json.loads(p.read_text(encoding="utf-8"))
+            self._loaded = True
+            return None
+        except Exception as e:
+            return f"Could not load profile {self.path}: {e}"
+
+    def reload(self) -> str | None:
+        """Re-read the file from disk."""
+        self.data = {}
+        self._loaded = False
+        return self.load()
+
+    @property
+    def enabled(self) -> bool:
+        """True if prompt_injection.enabled is set (default True if section missing)."""
+        pi = self.data.get("prompt_injection", {})
+        return bool(self._loaded and pi.get("enabled", True))
+
+    @property
+    def inject_as(self) -> str:
+        """Block label for prompt injection (from prompt_injection.inject_as)."""
+        pi = self.data.get("prompt_injection", {})
+        return pi.get("inject_as", "PROFILE")
+
+    def to_yaml(self) -> str:
+        """Render style/constraints/context sections as YAML string."""
+        renderable = {
+            k: v for k, v in self.data.items()
+            if k not in self._EXCLUDED_SECTIONS
+        }
+        return yaml.dump(
+            renderable,
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        ).strip()
+
+    def summary_line(self) -> str:
+        """One-line status for /show."""
+        if not self._loaded:
+            return "not loaded"
+        meta = self.data.get("meta", {})
+        profile_id = meta.get("id", "?")
+        status = "enabled" if self.enabled else "disabled"
+        return f"id={profile_id}, {status}"
+
+
 class LongTermMemory:
     """
     Long-term memory: profile, invariants, project context.
@@ -96,9 +175,9 @@ class LongTermMemory:
         self.use_profile = use_profile
         self.use_invariants = use_invariants
 
-        # Cached content (None = not loaded yet)
+        # Cached content
         self.project_memory: str | None = None
-        self.profile: str | None = None
+        self.profile_obj: Profile | None = None
         self.invariants: str | None = None
 
     def _read_file(self, path: str) -> str | None:
@@ -118,14 +197,18 @@ class LongTermMemory:
         if self.use_project_memory:
             self.project_memory = self._read_file(self.project_memory_file)
         if self.use_profile:
-            self.profile = self._read_file(self.profile_file)
+            self.profile_obj = Profile(self.profile_file)
+            err = self.profile_obj.load()
+            if err:
+                print(f"[WARN] {err}", file=sys.stderr)
+                self.profile_obj = None
         if self.use_invariants:
             self.invariants = self._read_file(self.invariants_file)
 
     def reload(self):
         """Re-read LTM files from disk (clears cache first)."""
         self.project_memory = None
-        self.profile = None
+        self.profile_obj = None
         self.invariants = None
         self.load()
 
@@ -133,14 +216,14 @@ class LongTermMemory:
         """
         Return list of (block_name, content) to inject into the prompt.
         Injection rules:
-          - PROFILE: always, if loaded
+          - PROFILE: always, if loaded and enabled (rendered as YAML)
           - PROJECT_MEMORY: always, if loaded
           - INVARIANTS: always if loaded; mandatory when task_state == EXECUTION
         Returns only non-empty blocks.
         """
         result = []
-        if self.use_profile and self.profile:
-            result.append(("PROFILE", self.profile))
+        if self.use_profile and self.profile_obj and self.profile_obj.enabled:
+            result.append((self.profile_obj.inject_as, self.profile_obj.to_yaml()))
         if self.use_project_memory and self.project_memory:
             result.append(("PROJECT_MEMORY", self.project_memory))
         if self.use_invariants and self.invariants:
@@ -153,7 +236,8 @@ class LongTermMemory:
         if self.use_project_memory:
             parts.append(f"project={'yes' if self.project_memory else 'not loaded'}")
         if self.use_profile:
-            parts.append(f"profile={'yes' if self.profile else 'not loaded'}")
+            p_status = self.profile_obj.summary_line() if self.profile_obj else "not loaded"
+            parts.append(f"profile={p_status}")
         if self.use_invariants:
             parts.append(f"invariants={'yes' if self.invariants else 'not loaded'}")
         return ", ".join(parts) if parts else "disabled"

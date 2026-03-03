@@ -1,0 +1,50 @@
+{
+  "meta": {
+    "id": "default",
+    "description": "Default user profile for AI Advent Challenge sessions"
+  },
+  "style": {
+    "language": "ru",
+    "verbosity": "concise",
+    "formality": "neutral",
+    "use_examples": true,
+    "use_bullet_points": true,
+    "clarify_before_answering": true,
+    "notes": "Ask one clarifying question if data is insufficient; do not guess. Do not invent facts."
+  },
+  "constraints": {
+    "stack": {
+      "language": "Python 3.12",
+      "platform": "Ubuntu 24.04, SSH only",
+      "environment": "venv (.venv), PEP 668 compliant"
+    },
+    "api": {
+      "provider": "OpenAI Responses API",
+      "sdk_allowed": false,
+      "http_client": "requests"
+    },
+    "architecture": {
+      "no_frameworks": true,
+      "minimal_dependencies": true,
+      "no_unsolicited_refactoring": true,
+      "persistence": "TOON file format only"
+    }
+  },
+  "context": {
+    "project": "AI Advent Challenge",
+    "description": "Systematic study of AI and LLMs through hands-on agent implementation",
+    "team_size": 1,
+    "deadline": null,
+    "user": {
+      "name": "Alexey",
+      "role": "developer",
+      "environment": "SSH terminal, remote VDS",
+      "experience": "Familiar with Python, CLI tools, and Linux"
+    }
+  },
+  "prompt_injection": {
+    "inject_as": "PROFILE",
+    "priority": "high",
+    "enabled": true
+  }
+}
