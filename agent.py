@@ -517,11 +517,13 @@ class Agent:
 
     def save_state(self, path: str):
         """Save working state to TOON file."""
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             toons.dump(self._state_dict(), f)
 
     def save_short_term(self, path: str):
         """Save short-term memory to a separate TOON file."""
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             toons.dump(self.stm.to_dict(), f)
 

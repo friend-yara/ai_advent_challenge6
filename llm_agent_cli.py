@@ -66,7 +66,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stop", action="append")
     p.add_argument("--timeout", type=int, default=60)
     p.add_argument("--json", action="store_true")
-    # Day 10: context strategies (currently only 'window' is implemented)
     p.add_argument(
         "--context-strategy",
         default="window",
@@ -74,23 +73,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--history-limit", type=int, default=6)
     p.add_argument("--context-summary", action="store_true")
-    p.add_argument("--state", default="profiles/default/state.toon")
-    p.add_argument("--short-term-file", default="profiles/default/short_term.toon")
+
+    # Profile directory (all per-user files live here)
+    p.add_argument("--profile", default="default",
+                   help="Profile name (subdirectory under profiles/)")
+
+    # Per-file overrides (default: derived from --profile)
+    p.add_argument("--state", default=None)
+    p.add_argument("--short-term-file", default=None)
     p.add_argument("--no-auto-load-short-term", action="store_true")
     p.add_argument("--no-auto-save-short-term", action="store_true")
 
     p.add_argument("--system-file", default="system_prompt.txt")
     p.add_argument("--system", help="Override system prompt")
 
-    # Day 11: long-term memory
-    p.add_argument("--project-memory-file", default="profiles/default/PROJECT_MEMORY.md")
-    p.add_argument("--profile-file", default="profiles/default/PROFILE.json")
-    p.add_argument("--invariants-file", default="profiles/default/INVARIANTS.md")
+    # Long-term memory file overrides (default: derived from --profile)
+    p.add_argument("--project-memory-file", default=None)
+    p.add_argument("--profile-file", default=None)
+    p.add_argument("--invariants-file", default=None)
     p.add_argument("--use-project-memory", action="store_true")
     p.add_argument("--use-profile", action="store_true", default=True)
     p.add_argument("--use-invariants", action="store_true")
 
     return p
+
+
+def resolve_profile_paths(args: argparse.Namespace) -> argparse.Namespace:
+    """
+    Fill in any file paths not explicitly set by deriving them from
+    profiles/<profile>/. Missing files in the profile dir are silently
+    tolerated by the loaders that use them.
+    """
+    profile_dir = Path("profiles") / args.profile
+    if args.state is None:
+        args.state = str(profile_dir / "state.toon")
+    if args.short_term_file is None:
+        args.short_term_file = str(profile_dir / "short_term.toon")
+    if args.project_memory_file is None:
+        args.project_memory_file = str(profile_dir / "PROJECT_MEMORY.md")
+    if args.profile_file is None:
+        args.profile_file = str(profile_dir / "PROFILE.json")
+    if args.invariants_file is None:
+        args.invariants_file = str(profile_dir / "INVARIANTS.md")
+    return args
 
 
 def print_help():
@@ -116,14 +141,17 @@ Commands:
   /ltm reload              Reload LTM files from disk without restarting
 
 Flags:
-  --short-term-file          Path to short-term memory file (default: short_term.toon)
+  --profile <name>           Profile to use (default: default).
+                             All files default to profiles/<name>/.
+                             Missing files are silently skipped.
+  --short-term-file          Override short-term memory file path
   --no-auto-load-short-term  Skip loading short_term.toon at startup
   --no-auto-save-short-term  Skip saving short_term.toon after each turn
-  --project-memory-file      Path to project memory file (default: PROJECT_MEMORY.md)
-  --profile-file             Path to profile file (default: PROFILE.md)
-  --invariants-file          Path to invariants file (default: INVARIANTS.md)
+  --project-memory-file      Override project memory file path
+  --profile-file             Override profile JSON file path
+  --invariants-file          Override invariants file path
   --use-project-memory       Inject PROJECT_MEMORY into prompt
-  --use-profile              Inject PROFILE into prompt
+  --use-profile              Inject PROFILE into prompt (default: on)
   --use-invariants           Inject INVARIANTS into prompt
 
 System prompt file:
@@ -137,7 +165,7 @@ def print_metrics(m: dict):
 
 def main():
     """Run REPL."""
-    args = build_parser().parse_args()
+    args = resolve_profile_paths(build_parser().parse_args())
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
