@@ -193,6 +193,11 @@ def main():
             print(f"WARNING: could not auto-load short-term: {e}", file=sys.stderr)
 
     print(f"LLM Agent (TOON v3.0). Model={agent.model}, strategy={agent.context_strategy}, history-limit={agent.history_limit}")
+    profile_name = (
+        agent.ltm.profile_obj.data.get("meta", {}).get("id", "unknown")
+        if agent.ltm.profile_obj else "unknown"
+    )
+    print(f"Привет, {profile_name}!")
     print("Подсказка: Enter — новая строка, Esc+Enter — отправить, Ctrl+D — выход.\n")
 
     session = None
