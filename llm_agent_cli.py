@@ -87,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile-file", default="PROFILE.md")
     p.add_argument("--invariants-file", default="INVARIANTS.md")
     p.add_argument("--use-project-memory", action="store_true")
-    p.add_argument("--use-profile", action="store_true")
+    p.add_argument("--use-profile", action="store_true", default=True)
     p.add_argument("--use-invariants", action="store_true")
 
     return p
