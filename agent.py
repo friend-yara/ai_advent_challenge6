@@ -618,6 +618,44 @@ class Agent:
         parts.append("Assistant:")
         return "\n".join(parts)
 
+    # ---------------- Profile summary ----------------
+
+    def whoami(self, profile_name: str) -> str:
+        """Return a short LLM-generated summary of the current user profile."""
+        sections = []
+        if self.ltm.profile_obj and self.ltm.profile_obj.enabled:
+            sections.append("PROFILE:\n" + self.ltm.profile_obj.to_yaml())
+        if self.ltm.project_memory:
+            sections.append("PROJECT_MEMORY:\n" + self.ltm.project_memory)
+        if self.ltm.invariants:
+            sections.append("INVARIANTS:\n" + self.ltm.invariants)
+
+        if not sections:
+            return f"Профиль «{profile_name}»: данные не загружены."
+
+        context = "\n\n".join(sections)
+        prompt = (
+            f"Ты — ассистент. На основе данных профиля пользователя "
+            f"«{profile_name}» напиши краткое описание на русском языке. "
+            f"Максимум 80 слов. Только факты из данных, без выдумок.\n\n"
+            f"{context}"
+        )
+        payload = {
+            "model": self.model,
+            "input": prompt,
+            "temperature": 0,
+            "max_output_tokens": 150,
+        }
+        data, _ = self._post(payload)
+        if isinstance(data, dict) and data.get("error"):
+            err = data.get("error") or {}
+            msg = err.get("message") if isinstance(err, dict) else str(err)
+            raise RuntimeError(msg or "API error (whoami)")
+        try:
+            return data["output"][0]["content"][0]["text"].strip()
+        except Exception:
+            return f"Профиль «{profile_name}»: не удалось получить ответ."
+
     # ---------------- Summary compression ----------------
 
     def _summarize_messages(self, messages: list[dict]) -> str:

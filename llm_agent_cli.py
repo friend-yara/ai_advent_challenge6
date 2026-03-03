@@ -137,6 +137,7 @@ Commands:
   /branch create <name>    Create new branch from current state
   /branch switch <name>    Switch to branch, saving current first
   /ltm reload              Reload LTM files from disk without restarting
+  /whoami                  Short summary of current user profile (<=80 words)
 
 Flags:
   --profile <name>           Profile to use (default: default).
@@ -299,6 +300,12 @@ def main():
             if text == "/checkpoint":
                 agent.checkpoint()
                 print(f"OK: checkpoint saved to branch '{agent.current_branch}'")
+                continue
+            if text == "/whoami":
+                try:
+                    print(agent.whoami(args.profile))
+                except Exception as e:
+                    print(f"ERROR: {e}", file=sys.stderr)
                 continue
             if text == "/ltm reload":
                 agent.ltm.reload()
