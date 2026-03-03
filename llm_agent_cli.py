@@ -89,10 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Long-term memory file overrides (default: derived from --profile)
     p.add_argument("--project-memory-file", default=None)
-    p.add_argument("--profile-file", default=None)
     p.add_argument("--invariants-file", default=None)
     p.add_argument("--use-project-memory", action="store_true")
-    p.add_argument("--use-profile", action="store_true", default=True)
     p.add_argument("--use-invariants", action="store_true")
 
     return p
@@ -109,10 +107,10 @@ def resolve_profile_paths(args: argparse.Namespace) -> argparse.Namespace:
         args.state = str(profile_dir / "state.toon")
     if args.short_term_file is None:
         args.short_term_file = str(profile_dir / "short_term.toon")
+    # profile_file is always derived from the profile dir, never overridable
+    args.profile_file = str(profile_dir / "PROFILE.json")
     if args.project_memory_file is None:
         args.project_memory_file = str(profile_dir / "PROJECT_MEMORY.md")
-    if args.profile_file is None:
-        args.profile_file = str(profile_dir / "PROFILE.json")
     if args.invariants_file is None:
         args.invariants_file = str(profile_dir / "INVARIANTS.md")
     return args
@@ -148,10 +146,8 @@ Flags:
   --no-auto-load-short-term  Skip loading short_term.toon at startup
   --no-auto-save-short-term  Skip saving short_term.toon after each turn
   --project-memory-file      Override project memory file path
-  --profile-file             Override profile JSON file path
   --invariants-file          Override invariants file path
   --use-project-memory       Inject PROJECT_MEMORY into prompt
-  --use-profile              Inject PROFILE into prompt (default: on)
   --use-invariants           Inject INVARIANTS into prompt
 
 System prompt file:
@@ -182,7 +178,7 @@ def main():
         profile_file=args.profile_file,
         invariants_file=args.invariants_file,
         use_project_memory=args.use_project_memory,
-        use_profile=args.use_profile,
+        use_profile=True,
         use_invariants=args.use_invariants,
     )
     ltm.load()
