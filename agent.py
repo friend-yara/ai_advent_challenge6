@@ -71,14 +71,6 @@ TASK_TRANSITIONS: dict[str, list[str]] = {
     "DONE":       ["PLANNING"],
 }
 
-# Mapping from legacy stage names to TaskContext states
-_STAGE_ALIAS: dict[str, str] = {
-    "IDLE":    "PLANNING",
-    "PLAN":    "PLANNING",
-    "EXECUTE": "EXECUTION",
-    "REVIEW":  "VALIDATION",
-}
-
 
 class Profile:
     """
@@ -328,8 +320,8 @@ class ShortTermMemory:
 class Agent:
     """
     Minimal LLM agent with:
-    - history
-    - stage-based state
+    - short-term, working, and long-term memory layers
+    - TaskContext state machine
     - TOON persistence
     """
 
@@ -390,15 +382,6 @@ class Agent:
 
     # Backward-compat properties delegating to TaskContext
     @property
-    def stage(self) -> str:
-        """Current task state (delegates to tc.state)."""
-        return self.tc.state
-
-    @stage.setter
-    def stage(self, value: str):
-        self.tc.state = value
-
-    @property
     def goal(self) -> str:
         """Current task description (delegates to tc.task)."""
         return self.tc.task
@@ -450,14 +433,6 @@ class Agent:
         self.facts = copy.deepcopy(snap.get("facts", {}))
         if "tc" in snap:
             self.tc.from_dict(snap["tc"])
-        else:
-            # Migrate old snapshot format
-            self.tc.task = snap.get("goal", "")
-            old_stage = snap.get("stage", "PLANNING")
-            self.tc.state = _STAGE_ALIAS.get(old_stage) or old_stage
-            self.tc.plan = copy.deepcopy(snap.get("plan", []))
-            self.tc.actions = copy.deepcopy(snap.get("actions", []))
-            self.tc.notes = copy.deepcopy(snap.get("notes", []))
 
     def checkpoint(self):
         """Save current live state as a snapshot of the current branch."""
@@ -494,11 +469,6 @@ class Agent:
     def set_task_state(self, state: str) -> str | None:
         """Set TaskContext state with transition validation. Returns error string or None."""
         return self.tc.set_state(state.upper())
-
-    def set_stage(self, stage: str) -> str | None:
-        """Set stage with legacy alias support and transition validation. Returns error string or None."""
-        mapped = _STAGE_ALIAS.get(stage.upper(), stage.upper())
-        return self.tc.set_state(mapped)
 
     def set_system_prompt(self, text: str):
         """Override system prompt."""
@@ -539,14 +509,6 @@ class Agent:
             st = toons.load(f)
         if "tc" in st:
             self.tc.from_dict(st["tc"])
-        else:
-            # Migrate old flat format (stage/goal/plan/actions/notes)
-            self.tc.task = st.get("goal", "")
-            old_stage = st.get("stage", "PLANNING")
-            self.tc.state = _STAGE_ALIAS.get(old_stage) or old_stage
-            self.tc.plan = st.get("plan", []) or []
-            self.tc.actions = st.get("actions", []) or []
-            self.tc.notes = st.get("notes", []) or []
         self.facts = st.get("facts", {}) or {}
         self.current_branch = st.get("current_branch", "main") or "main"
         self.branches = st.get("branches", {}) or {}

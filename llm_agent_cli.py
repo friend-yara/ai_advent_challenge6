@@ -10,25 +10,21 @@ Example workflow:
 1) Start agent:
    $ python llm_agent_cli.py
 
-2) Set goal:
-   > /goal Write a learning plan for LLM basics
+2) Set task:
+   > /task Write a learning plan for LLM basics
 
-3) Switch to planning stage:
-   > /stage PLAN
-   > Create a 5-step plan to reach the goal
-
-4) Execute first step:
-   > /stage EXECUTE
+3) Switch to execution state:
+   > /state EXECUTION
    > Start with step 1
 
-5) Review result:
-   > /stage REVIEW
+4) Validate result:
+   > /state VALIDATION
    > Check if the plan is realistic
 
-6) Save state:
+5) Save state:
    > /save
 
-7) Exit:
+6) Exit:
    > /exit
 """
 
@@ -128,7 +124,6 @@ Commands:
   /load                    Load state from state.toon
   /goal                    Set high-level agent goal (alias for /task)
   /task <text>             Set task in working memory (TaskContext.task)
-  /stage <s>               Set stage (legacy: IDLE|PLAN|EXECUTE|REVIEW, with transition check)
   /state <s>               Set TaskContext state: PLANNING|EXECUTION|VALIDATION|DONE
   /system                  Override system prompt temporarily
   /show                    Display working memory + STM (two lines)
@@ -271,13 +266,6 @@ def main():
             if text.startswith("/task "):
                 agent.tc.task = text[6:].strip()
                 print("OK: task set")
-                continue
-            if text.startswith("/stage "):
-                err = agent.set_stage(text[7:].strip())
-                if err:
-                    print(f"ERROR: {err}")
-                else:
-                    print(f"OK: stage={agent.stage}")
                 continue
             if text.startswith("/state "):
                 err = agent.set_task_state(text[7:].strip())
