@@ -45,10 +45,6 @@ version in `requirements.txt`.
 | `python llm_agent_cli.py --use-project-memory` | Inject PROJECT_MEMORY |
 | `llm_agent` | Same as above via symlink in ~/bin |
 
-Weekly exercises live in numbered directories (`01_simple_request/`,
-`04_temperature/`, etc.). Each is a self-contained script; do not refactor
-them into the core agent unless explicitly asked.
-
 ---
 
 ## Build / Lint / Test Commands
