@@ -86,8 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
     # Long-term memory file overrides (default: derived from --profile)
     p.add_argument("--project-memory-file", default=None)
     p.add_argument("--invariants-file", default=None)
-    p.add_argument("--use-project-memory", action="store_true")
-    p.add_argument("--use-invariants", action="store_true")
+    p.add_argument("--use-project-memory", action="store_true", default=True)
+    p.add_argument("--use-invariants", action="store_true", default=True)
 
     return p
 
