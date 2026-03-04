@@ -112,19 +112,33 @@ def resolve_profile_paths(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
+def state_prompt(tc) -> str:
+    """Return state-labeled prompt prefix, e.g. '[PLAN] > '."""
+    labels = {
+        "PLANNING":   "[PLAN]",
+        "EXECUTION":  "[EXEC]",
+        "VALIDATION": "[VALI]",
+        "DONE":       "[DONE]",
+    }
+    label = labels.get(tc.state, f"[{tc.state[:4]}]")
+    return f"{label} > "
+
+
 def print_help():
     """Print compact CLI help with example workflow."""
     print(
         """
 Commands:
-  /exit                    Exit the agent
+  /exit                    Exit the agent (progress saved automatically)
   /help                    Show this help
-  /reset                   Clear all state and history
-  /save                    Save state to state.toon
-  /load                    Load state from state.toon
-  /goal                    Set high-level agent goal (alias for /task)
-  /task <text>             Set task in working memory (TaskContext.task)
-  /state <s>               Set TaskContext state: PLANNING|EXECUTION|VALIDATION|DONE
+  /reset                   Clear working memory + dialogue, save both files
+  /save                    Save working state to state.toon
+  /load                    Load working state from state.toon
+  /goal                    Set task description (alias for /task)
+  /task <text>             Set task in working memory
+  /state <s>               Transition state: PLANNING|EXEC|EXECUTION|
+                           VALIDATION|VALI|DONE
+  /step                    Execute next step (EXECUTION state only)
   /system                  Override system prompt temporarily
   /show                    Display working memory + STM (two lines)
   /checkpoint              Save snapshot of current branch
@@ -196,10 +210,11 @@ def main():
     )
 
     # Auto-load working state on startup (if file exists)
+    state_was_loaded = False
     try:
         if Path(args.state).exists():
             agent.load_state(args.state)
-            print(f"OK: auto-loaded state from {args.state}")
+            state_was_loaded = True
     except Exception as e:
         print(f"WARNING: could not auto-load state: {e}", file=sys.stderr)
 
@@ -208,17 +223,44 @@ def main():
         try:
             if Path(args.short_term_file).exists():
                 agent.load_short_term(args.short_term_file)
-                print(f"OK: auto-loaded short-term from {args.short_term_file}")
         except Exception as e:
             print(f"WARNING: could not auto-load short-term: {e}", file=sys.stderr)
 
-    print(f"LLM Agent (TOON v3.0). Model={agent.model}, strategy={agent.context_strategy}, history-limit={agent.history_limit}")
+    print(f"LLM Agent (TOON v3.0). Model={agent.model}, "
+          f"strategy={agent.context_strategy}, "
+          f"history-limit={agent.history_limit}")
     profile_name = (
         agent.ltm.profile_obj.data.get("meta", {}).get("id", "unknown")
         if agent.ltm.profile_obj else "unknown"
     )
-    print(f"Привет, {profile_name}!")
-    print("Подсказка: Enter — новая строка, Esc+Enter — отправить, Ctrl+D — выход.\n")
+
+    # Welcome-back or fresh greeting
+    if state_was_loaded and (agent.tc.task or agent.tc.state != "PLANNING"):
+        try:
+            print(agent.welcome_back())
+        except Exception:
+            print(f"С возвращением, {profile_name}!")
+        tc = agent.tc
+        if tc.state == "PLANNING" and tc.plan:
+            print(agent.format_todo())
+            print("Введите /state EXEC чтобы перейти к выполнению, "
+                  "или продолжите корректировку плана.")
+        elif tc.state == "EXECUTION":
+            print(agent.format_todo())
+            step_num = tc.step + 1
+            print(f"Вы остановились на шаге {step_num}: {tc.current}")
+            print("/step — продолжить | /state PLAN — вернуться к планированию"
+                  " | /exit — выйти")
+        elif tc.state == "VALIDATION":
+            print("Вы в стадии VALIDATION. Продолжайте проверку или введите "
+                  "/state EXEC / /state DONE.")
+        elif tc.state == "DONE":
+            print("Предыдущая задача завершена. /state PLAN — новая задача.")
+    else:
+        print(f"Привет, {profile_name}!")
+
+    print("Подсказка: Enter — новая строка, Esc+Enter — отправить, "
+          "Ctrl+D — выход.\n")
 
     session = None
     if PromptSession is not None:
@@ -226,15 +268,16 @@ def main():
 
     while True:
         try:
+            prompt_str = state_prompt(agent.tc)
             if session is not None:
                 with patch_stdout():
                     text = session.prompt(
-                        "> ",
+                        prompt_str,
                         multiline=True,
                         prompt_continuation="... ",
                     ).strip()
             else:
-                text = input("> ").strip()
+                text = input(prompt_str).strip()
         except (EOFError, KeyboardInterrupt):
             break
 
@@ -248,7 +291,10 @@ def main():
                 print_help()
                 continue
             if text == "/reset":
-                agent.reset()
+                agent.reset_working()
+                agent.reset_short_term()
+                agent.save_state(args.state)
+                agent.save_short_term(args.short_term_file)
                 print("OK: reset")
                 continue
             if text == "/save":
@@ -268,11 +314,65 @@ def main():
                 print("OK: task set")
                 continue
             if text.startswith("/state "):
-                err = agent.set_task_state(text[7:].strip())
+                raw = text[7:].strip().upper()
+                _aliases = {
+                    "EXEC": "EXECUTION",
+                    "PLAN": "PLANNING",
+                    "VALID": "VALIDATION",
+                    "VALI": "VALIDATION",
+                }
+                new_state = _aliases.get(raw, raw)
+                # Guard: plan must exist before entering EXECUTION
+                if (new_state == "EXECUTION"
+                        and not agent.tc.can_transition_to_execution()):
+                    print("ERROR: план пуст. Сначала сформируйте план "
+                          "в PLANNING.")
+                    continue
+                err = agent.set_task_state(new_state)
                 if err:
                     print(f"ERROR: {err}")
                 else:
                     print(f"OK: state={agent.tc.state}")
+                    if agent.tc.state == "EXECUTION":
+                        print(agent.format_todo())
+                        print(f"Текущий шаг: {agent.tc.current}")
+                        print("/step — выполнить шаг | "
+                              "/state PLAN — к планированию | "
+                              "/exit — выйти")
+                    elif agent.tc.state == "DONE":
+                        print("Задача завершена. Результаты ИИ следует "
+                              "перепроверять вручную.")
+                        print("/state PLAN — начать новую задачу")
+                    agent.save_state(args.state)
+                continue
+            if text == "/step":
+                if agent.tc.state != "EXECUTION":
+                    print("ERROR: /step доступен только в состоянии EXECUTION")
+                    continue
+                if agent.tc.step >= agent.tc.total:
+                    print("Все шаги уже выполнены.")
+                    print("/state VALID — валидация | "
+                          "/state PLAN — перепланировать")
+                    continue
+                try:
+                    answer = agent.run_step()
+                    print(answer)
+                    print()
+                    print(agent.format_todo())
+                    if agent.tc.step >= agent.tc.total:
+                        print("\nВсе шаги выполнены.")
+                        print("/state VALID — валидация | "
+                              "/state PLAN — перепланировать")
+                    else:
+                        print(f"\nСледующий шаг: {agent.tc.current}")
+                        print("/step — выполнить | "
+                              "/state PLAN — к планированию | "
+                              "/exit — выйти")
+                    agent.save_state(args.state)
+                    if not args.no_auto_save_short_term:
+                        agent.save_short_term(args.short_term_file)
+                except Exception as e:
+                    print(f"ERROR: {e}", file=sys.stderr)
                 continue
             if text.startswith("/system "):
                 agent.set_system_prompt(text[8:].strip())
@@ -327,21 +427,40 @@ def main():
         try:
             answer, metrics = agent.reply(text)
 
+            # In PLANNING: detect if LLM produced a todo checklist
+            if agent.tc.state == "PLANNING":
+                steps = agent.plan_from_reply(answer)
+                if steps:
+                    agent.tc.plan = steps
+                    agent.tc.total = len(steps)
+                    agent.tc.step = 0
+                    agent.tc.done = []
+                    agent.tc.current = steps[0]
+                    print(answer, end="")
+                    print_metrics(metrics)
+                    print("Готов перейти к выполнению. "
+                          "Введите /state EXEC или внесите корректировки.")
+                else:
+                    print(answer, end="")
+                    print_metrics(metrics)
+            else:
+                print(answer, end="")
+                print_metrics(metrics)
+
             # Auto-save working state after each successful turn
             try:
                 agent.save_state(args.state)
             except Exception as e:
-                print(f"WARNING: could not auto-save state: {e}", file=sys.stderr)
+                print(f"WARNING: could not auto-save state: {e}",
+                      file=sys.stderr)
 
             # Auto-save short-term memory after each successful turn
             if not args.no_auto_save_short_term:
                 try:
                     agent.save_short_term(args.short_term_file)
                 except Exception as e:
-                    print(f"WARNING: could not auto-save short-term: {e}", file=sys.stderr)
-
-            print(answer, end="")
-            print_metrics(metrics)
+                    print(f"WARNING: could not auto-save short-term: {e}",
+                          file=sys.stderr)
 
         except Exception as e:
             print("ERROR:", e, file=sys.stderr)

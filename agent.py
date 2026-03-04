@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import copy
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -63,11 +64,11 @@ def compute_cost(pricing: dict, model: str, in_tok, out_tok):
     )
 
 
-# Allowed TaskContext state transitions
+# Allowed TaskContext state transitions (strict graph)
 TASK_TRANSITIONS: dict[str, list[str]] = {
-    "PLANNING":   ["EXECUTION", "DONE"],
-    "EXECUTION":  ["VALIDATION", "PLANNING", "DONE"],
-    "VALIDATION": ["PLANNING", "EXECUTION", "DONE"],
+    "PLANNING":   ["EXECUTION"],
+    "EXECUTION":  ["VALIDATION", "PLANNING"],
+    "VALIDATION": ["DONE", "EXECUTION"],
     "DONE":       ["PLANNING"],
 }
 
@@ -252,6 +253,10 @@ class TaskContext:
         # Backward-compat fields
         self.actions: list[str] = []
         self.notes: list[str] = []
+
+    def can_transition_to_execution(self) -> bool:
+        """Return True only when plan is non-empty."""
+        return bool(self.plan)
 
     def set_state(self, new_state: str) -> str | None:
         """Transition to new_state. Returns None on success, error string on failure."""
@@ -579,6 +584,141 @@ class Agent:
                 parts.append(f"Assistant: {text}")
         parts.append("Assistant:")
         return "\n".join(parts)
+
+    # ---------------- Task state machine helpers ----------------
+
+    def reset_working(self):
+        """Reset working memory (TaskContext) only. Does not touch STM."""
+        self.tc = TaskContext()
+        self.facts = {}
+        self.current_branch = "main"
+        self.branches = {"main": self._snapshot()}
+
+    def reset_short_term(self):
+        """Reset short-term memory only. Does not touch working memory."""
+        self.stm.messages = []
+        self.stm.summary = ""
+
+    def format_todo(self) -> str:
+        """Return current plan as a [ ]/[x] checklist string."""
+        if not self.tc.plan:
+            return "(план пуст)"
+        lines = []
+        for i, step in enumerate(self.tc.plan):
+            mark = "x" if i < self.tc.step else " "
+            lines.append(f"[{mark}] {step}")
+        return "\n".join(lines)
+
+    def plan_from_reply(self, text: str) -> list[str] | None:
+        """
+        Parse a TODO checklist from LLM reply.
+        Recognises lines matching '[ ] ...', '- [ ] ...', or '1. ...' patterns.
+        Returns list of step strings or None if no list detected.
+        """
+        steps = []
+        for line in text.splitlines():
+            line = line.strip()
+            # [ ] step or - [ ] step
+            m = re.match(r"[-*]?\s*\[\s*\]\s+(.+)", line)
+            if m:
+                steps.append(m.group(1).strip())
+                continue
+            # 1. step or 1) step
+            m = re.match(r"\d+[.)]\s+(.+)", line)
+            if m:
+                steps.append(m.group(1).strip())
+        return steps if len(steps) >= 2 else None
+
+    def run_step(self) -> str:
+        """
+        Execute the current step in EXECUTION state via LLM.
+        Advances tc.step, tc.done, tc.current. Returns LLM reply text.
+        """
+        if self.tc.step >= self.tc.total:
+            return "Все шаги уже выполнены."
+
+        current_step = self.tc.plan[self.tc.step]
+        step_prompt = (
+            f"Выполни шаг {self.tc.step + 1} из {self.tc.total}: {current_step}\n"
+            f"Задача: {self.tc.task}\n"
+            "Выполни только этот шаг. Не переходи к следующим."
+        )
+        self.stm.messages.append({"role": "user", "text": step_prompt})
+        self._compress_history_if_needed()
+        prompt = self._build_prompt(step_prompt)
+
+        payload = {"model": self.model, "input": prompt}
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.max_output_tokens is not None:
+            payload["max_output_tokens"] = self.max_output_tokens
+
+        data, _ = self._post(payload)
+        if isinstance(data, dict) and data.get("error"):
+            err = data.get("error") or {}
+            msg = err.get("message") if isinstance(err, dict) else str(err)
+            raise RuntimeError(msg or "API error (run_step)")
+        try:
+            text = data["output"][0]["content"][0]["text"]
+        except Exception:
+            text = json.dumps(data, ensure_ascii=False)
+
+        self.stm.messages.append({"role": "assistant", "text": text})
+
+        # Advance state
+        self.tc.done.append(current_step)
+        self.tc.step += 1
+        if self.tc.step < self.tc.total:
+            self.tc.current = self.tc.plan[self.tc.step]
+        else:
+            self.tc.current = ""
+
+        return text
+
+    def welcome_back(self) -> str:
+        """
+        Generate a short 'welcome back' message using last STM messages + tc state.
+        Falls back to plain text if LLM call fails.
+        """
+        last_msgs = self.stm.messages[-2:] if self.stm.messages else []
+        context_lines = "\n".join(
+            f"{m['role']}: {m['text']}" for m in last_msgs
+        )
+        step_info = ""
+        if self.tc.state == "EXECUTION" and self.tc.plan:
+            step_info = (
+                f"Шаг {self.tc.step}/{self.tc.total}: "
+                f"{self.tc.current or '—'}"
+            )
+        elif self.tc.task:
+            step_info = f"Задача: {self.tc.task}"
+
+        prompt = (
+            "Пользователь вернулся в агент после перерыва. "
+            "Напиши одно-два предложения приветствия на русском языке, "
+            "начиная с 'С возвращением!', и кратко напомни, "
+            "на чём остановились.\n\n"
+            f"Состояние: {self.tc.state}\n"
+            f"{step_info}\n"
+            f"Последний диалог:\n{context_lines or '(нет)'}"
+        )
+        try:
+            payload = {
+                "model": self.model,
+                "input": prompt,
+                "temperature": 0,
+                "max_output_tokens": 100,
+            }
+            data, _ = self._post(payload)
+            if isinstance(data, dict) and not data.get("error"):
+                return data["output"][0]["content"][0]["text"].strip()
+        except Exception:
+            pass
+        # Fallback to plain text
+        return (
+            f"С возвращением! Вы остановились на этапе {self.tc.state}"
+            + (f": {step_info}" if step_info else ".")
+        )
 
     # ---------------- Profile summary ----------------
 
