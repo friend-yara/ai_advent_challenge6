@@ -41,9 +41,10 @@ version in `requirements.txt`.
 | `python llm_agent_cli.py -t 0.7` | Set temperature |
 | `python llm_agent_cli.py --history-limit 10` | Limit history window |
 | `python llm_agent_cli.py --context-summary` | Enable context compression |
-| `python llm_agent_cli.py --use-invariants` | Inject INVARIANTS into prompt |
-| `python llm_agent_cli.py --use-project-memory` | Inject PROJECT_MEMORY |
 | `llm_agent` | Same as above via symlink in ~/bin |
+
+Flags `--use-project-memory` and `--use-invariants` default to `True`.
+`--use-profile` is always `True` (not a CLI flag).
 
 ---
 
@@ -75,8 +76,8 @@ pricing.json              Manual pricing table for token cost calculation
 requirements.txt          Pinned Python dependencies
 profiles/
   default/
-    PROFILE.json          Default user profile (JSON, rendered as YAML)
-    INVARIANTS.md         Stack/arch/budget/banned constraints (plain text)
+    PROFILE.json          User profile (JSON, rendered as YAML)
+    INVARIANTS.yaml       Stack/arch/budget/banned constraints (YAML)
     PROJECT_MEMORY.md     Project context document (plain text)
     state.toon            Working memory — gitignored
     short_term.toon       Dialogue history — gitignored
@@ -85,7 +86,7 @@ profiles/
 
 ---
 
-## Memory Architecture (Day 11+)
+## Memory Architecture
 
 Three independent memory layers, each with its own storage:
 
@@ -93,7 +94,7 @@ Three independent memory layers, each with its own storage:
 |---|---|---|---|
 | Short-term | `ShortTermMemory` | `short_term.toon` | messages, summary |
 | Working | `TaskContext` | `state.toon` | task, state, plan, step, done |
-| Long-term | `LongTermMemory` + `Profile` | `.md` / `.json` files | profile, invariants, project memory |
+| Long-term | `LongTermMemory` | `.yaml` / `.md` / `.json` | profile, invariants, project memory |
 
 **Rules:**
 - `state.toon` must NEVER contain dialogue (`messages`/`summary`).
@@ -103,37 +104,104 @@ Three independent memory layers, each with its own storage:
 
 **Prompt block order:**
 ```
-SYSTEM → PROFILE → PROJECT_MEMORY → INVARIANTS → STATE → RULES → SUMMARY → FACTS → DIALOG
+SYSTEM → PROFILE → PROJECT_MEMORY → INVARIANTS → STATE → RULES → VALIDATION → SUMMARY → FACTS → DIALOG
 ```
+
+`RULES` block injected only when `tc.current` is set (EXECUTION state).
+`VALIDATION` block injected only when `tc.state == "VALIDATION"` and
+invariants are loaded.
 
 ---
 
 ## Key Classes in `agent.py`
 
 ### `Profile`
-Loads `PROFILE.json`; renders `style`/`constraints`/`context` as YAML via
+Loads `PROFILE.json`. Renders `style`/`constraints`/`context` as YAML via
 `yaml.dump()` for prompt injection. `meta` and `prompt_injection` sections are
 excluded from rendering. `prompt_injection.enabled` controls whether the block
 is injected.
 
+### `Invariants`
+Loads `INVARIANTS.yaml`. `to_text()` renders human-readable structured text
+for prompt injection (section headers + items, `meta` excluded).
+`to_banned_lines()` returns the `banned:` list as `- item` lines for
+`InvariantChecker`.
+
+### `InvariantChecker`
+Parses banned rules from `Invariants.to_banned_lines()`. Matches lines of the
+form `- No <keyword>`. Each keyword maps to regex patterns
+(`_KEYWORD_PATTERNS`). Two check points in `reply()`:
+- **Pre-check:** soft warn if user query matches banned patterns; LLM still
+  called. Violations returned in `metrics["pre_violations"]`.
+- **Post-check:** if LLM answer matches banned patterns:
+  - In `PLANNING`: replace answer with correction message (no retry).
+  - Other states: retry LLM once with correction prompt; if retry also fails,
+    return a refusal string.
+
 ### `LongTermMemory`
-Loads `Profile`, `PROJECT_MEMORY.md`, `INVARIANTS.md` into process cache.
-Never persisted to disk. `blocks(task_state)` returns `(name, content)` pairs
-to inject. `reload()` re-reads all files without restarting.
+Loads `Profile`, `PROJECT_MEMORY.md`, `INVARIANTS.yaml` into process cache.
+Never persisted to disk. Holds `InvariantChecker` instance (`self.checker`).
+`blocks(task_state)` returns `(name, content)` pairs to inject.
+`reload()` re-reads all files without restarting.
 
 ### `TaskContext`
 Working memory state machine. States: `PLANNING → EXECUTION → VALIDATION →
-DONE`. Transition validation is enforced in `set_state()` — invalid transitions
-return an error string instead of raising. Legacy `IDLE/PLAN/EXECUTE/REVIEW`
-names are mapped via `_STAGE_ALIAS`.
+DONE`. Strict transitions defined in `TASK_TRANSITIONS` constant.
+`set_state()` validates the transition and returns an error string on failure
+instead of raising. Fields: `task`, `state`, `step`, `total`, `plan`, `done`,
+`current`, `actions`, `notes`.
 
 ### `ShortTermMemory`
 Current dialogue only (`messages` list + `summary` string). Serialised to
 `short_term.toon` separately from working state.
 
 ### `Agent`
-Composes all layers. `stage`/`goal`/`plan`/`actions`/`notes` are `@property`
-shims delegating to `self.tc` for backward compatibility.
+Composes all layers. Key methods:
+- `reply(user_text)` — main interaction; runs pre/post invariant checks.
+- `run_step()` — executes one plan step in EXECUTION state via LLM.
+- `welcome_back()` — LLM-generated resume message shown on startup with saved
+  state.
+- `whoami(profile_name)` — LLM-generated profile summary (≤80 words).
+- `plan_from_reply(text)` — parses `[ ] step` / `1. step` lists from LLM reply.
+- `format_todo()` — renders plan as `[x]/[ ]` checklist.
+- `reset_working()` / `reset_short_term()` — layer-specific resets.
+- `save_state` / `load_state` / `save_short_term` / `load_short_term` — TOON
+  persistence (working and STM stored in separate files).
+- Backward-compat `@property` shims: `goal`, `plan`, `actions`, `notes`
+  delegate to `self.tc`.
+
+---
+
+## CLI Commands
+
+| Command | Description |
+|---|---|
+| `/help` | Show command reference |
+| `/exit` | Exit (state auto-saved) |
+| `/reset` | Clear working memory + dialogue, save both files |
+| `/save` | Save working state to `state.toon` |
+| `/load` | Load working state from `state.toon` |
+| `/task <text>` | Set task description in working memory |
+| `/goal <text>` | Alias for `/task` |
+| `/state <s>` | Transition state: `PLANNING`/`PLAN`, `EXECUTION`/`EXEC`, `VALIDATION`/`VALI`, `DONE` |
+| `/step` | Execute next step (EXECUTION state only) |
+| `/show` | Display working memory + STM status |
+| `/system <text>` | Override system prompt for this session |
+| `/checkpoint` | Save snapshot of current branch |
+| `/branch list` | List all branches (`*` = active) |
+| `/branch create <name>` | Create branch from current state |
+| `/branch switch <name>` | Switch to branch, saving current state first |
+| `/ltm reload` | Reload LTM files from disk without restarting |
+| `/whoami` | LLM-generated summary of current profile (≤80 words) |
+
+**State prompt labels:** `[PLAN] >`, `[EXEC] >`, `[VALI] >`, `[DONE] >`
+
+**Auto-behaviours:**
+- On startup with saved state: prints `welcome_back()` message and state hints.
+- After each REPL turn: auto-saves `state.toon` and `short_term.toon`.
+- `/state EXECUTION`: guarded — requires non-empty plan.
+- `/state VALIDATION`: auto-runs `InvariantChecker` against the full plan.
+- In PLANNING: if LLM reply contains a checklist, auto-populates `tc.plan`.
 
 ---
 
@@ -242,6 +310,16 @@ missing files are silently tolerated (WARN printed to stderr, no crash).
 ```
 
 `to_yaml()` renders all sections except `meta` and `prompt_injection`.
+
+`INVARIANTS.yaml` schema (key sections: `stack`, `api`, `architecture`,
+`budget`, `banned`). The `banned` list drives `InvariantChecker`:
+
+```yaml
+banned:
+  - No OpenAI SDK
+  - No system-wide pip installs
+  - No GUI frameworks
+```
 
 ---
 
