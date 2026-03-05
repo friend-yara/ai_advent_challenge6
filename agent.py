@@ -172,6 +172,7 @@ class LongTermMemory:
         self.project_memory: str | None = None
         self.profile_obj: Profile | None = None
         self.invariants: str | None = None
+        self.checker: InvariantChecker = InvariantChecker()
 
     def _read_file(self, path: str) -> str | None:
         """Read a text file, returning None with a warning if missing."""
@@ -197,12 +198,15 @@ class LongTermMemory:
                 self.profile_obj = None
         if self.use_invariants:
             self.invariants = self._read_file(self.invariants_file)
+            if self.invariants:
+                self.checker.load_from_text(self.invariants)
 
     def reload(self):
         """Re-read LTM files from disk (clears cache first)."""
         self.project_memory = None
         self.profile_obj = None
         self.invariants = None
+        self.checker = InvariantChecker()
         self.load()
 
     def blocks(self, task_state: str) -> list[tuple[str, str]]:
@@ -232,8 +236,90 @@ class LongTermMemory:
             p_status = self.profile_obj.summary_line() if self.profile_obj else "not loaded"
             parts.append(f"profile={p_status}")
         if self.use_invariants:
-            parts.append(f"invariants={'yes' if self.invariants else 'not loaded'}")
+            inv_status = self.checker.summary_line() if self.invariants else "not loaded"
+            parts.append(f"invariants={inv_status}")
         return ", ".join(parts) if parts else "disabled"
+
+
+class InvariantRule:
+    """A single invariant rule with human-readable description and regex patterns."""
+
+    def __init__(self, description: str, patterns: list[str]):
+        """Compile regex patterns at init time."""
+        self.description = description
+        self.compiled = [re.compile(p, re.IGNORECASE) for p in patterns]
+
+    def matches(self, text: str) -> bool:
+        """Return True if any pattern matches the text."""
+        return any(p.search(text) for p in self.compiled)
+
+
+class InvariantChecker:
+    """
+    Checks text (user queries, LLM answers) against loaded invariant rules.
+    Rules are parsed from INVARIANTS.md at load time. No extra API calls.
+    """
+
+    # Mapping from known ban keywords to regex patterns
+    _KEYWORD_PATTERNS: dict[str, list[str]] = {
+        "openai sdk":    [r"import openai", r"from openai", r"openai\.Client",
+                          r"OpenAI\(", r"openai\.chat", r"openai\.completions"],
+        "openai":        [r"import openai", r"from openai\b"],
+        "langchain":     [r"import langchain", r"from langchain", r"langchain\."],
+        "sdk":           [r"import openai", r"openai\."],
+        "system-wide pip": [r"sudo pip", r"pip3?\s+install(?!\s+--user)(?!\s+-r\s)"],
+        "pip install":   [r"sudo pip", r"pip3?\s+install(?!\s+--user)(?!\s+-r\s)"],
+        "gui":           [r"\btkinter\b", r"\bPyQt\b", r"\bwxPython\b",
+                          r"\bpygame\b", r"\bpyautogui\b"],
+        "browser":       [r"\bselenium\b", r"\bplaywright\b", r"\bpuppeteer\b"],
+        "boto3":         [r"\bboto3\b"],
+        "firebase":      [r"\bfirebase\b"],
+        "supabase":      [r"\bsupabase\b"],
+        "aws":           [r"\baws_\w+\b", r"\bboto3\b"],
+        "database":      [r"\bsqlalchemy\b", r"\bpsycopg2\b", r"\bdjango\.db\b"],
+    }
+
+    def __init__(self):
+        """Initialize with empty rule set."""
+        self.rules: list[InvariantRule] = []
+        self.last_result: tuple[bool, list[str]] = (True, [])
+
+    def load_from_text(self, text: str):
+        """Parse InvariantRule list from INVARIANTS.md content."""
+        self.rules = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            # Match lines like "- No ..." or "- no ..."
+            if not re.match(r"^-\s+[Nn]o\b", stripped):
+                continue
+            description = stripped.lstrip("- ").strip()
+            patterns = self._patterns_for(description)
+            if patterns:
+                self.rules.append(InvariantRule(description, patterns))
+
+    def _patterns_for(self, description: str) -> list[str]:
+        """Return regex patterns for a rule description by keyword matching."""
+        desc_lower = description.lower()
+        for keyword, patterns in self._KEYWORD_PATTERNS.items():
+            if keyword in desc_lower:
+                return patterns
+        return []
+
+    def check(self, text: str) -> tuple[bool, list[str]]:
+        """
+        Check text against all rules.
+        Returns (passed, violations) where violations is list of descriptions.
+        """
+        violations = [r.description for r in self.rules if r.matches(text)]
+        passed = not violations
+        self.last_result = (passed, violations)
+        return passed, violations
+
+    def summary_line(self) -> str:
+        """One-line status: rule count + last check result."""
+        passed, violations = self.last_result
+        status = "PASS" if passed else f"FAIL({len(violations)})"
+        return f"rules={len(self.rules)}, last={status}"
 
 
 class TaskContext:
@@ -566,6 +652,14 @@ class Agent:
                 "- When step is complete, signal next_step"
             )
 
+        if self.tc.state == "VALIDATION" and self.ltm.invariants:
+            parts.append(
+                "\nVALIDATION:\n"
+                "Check the completed steps and this answer against INVARIANTS. "
+                "Report any violations explicitly with the rule text and "
+                "a suggested fix."
+            )
+
         if self.context_summary and self.stm.summary:
             parts.append("\nSUMMARY:\n" + self.stm.summary.strip())
 
@@ -837,11 +931,92 @@ class Agent:
                 delay *= 2
         return {}, 0.0
 
+    # ---------------- Invariant enforcement ----------------
+
+    def _zero_metrics(self) -> dict:
+        """Return empty metrics dict for responses that skip the LLM."""
+        return {
+            "model": self.model,
+            "time": 0.0,
+            "in": 0,
+            "out": 0,
+            "cost": "$0.000000",
+        }
+
+    def _planning_violation_message(self, violations: list[str]) -> str:
+        """
+        Return a correction message for PLANNING state when LLM answer
+        contains invariant violations. Does not call the LLM.
+        """
+        lines = [
+            "Ответ содержит нарушения инвариантов проекта:\n"
+        ]
+        for i, v in enumerate(violations, 1):
+            lines.append(f"  Правило {i}: «{v}»")
+        lines.append(
+            "\nПожалуйста, переформулируй план без использования "
+            "запрещённых инструментов и зависимостей.\n"
+            "Ограничения: только requests, venv, без SDK и внешних фреймворков."
+        )
+        return "\n".join(lines)
+
+    def _pre_check_warning(self, violations: list[str]) -> str:
+        """Return a warning string for user queries that match banned patterns."""
+        lines = ["[ВНИМАНИЕ] Запрос содержит упоминание запрещённых правил:"]
+        for v in violations:
+            lines.append(f"  - {v}")
+        return "\n".join(lines)
+
+    def _retry_with_violations(self, answer: str, violations: list[str]) -> str:
+        """
+        Retry the LLM once with an explicit correction prompt.
+        If retry also fails invariant check, return a refusal string.
+        """
+        violation_list = "\n".join(f"  - {v}" for v in violations)
+        retry_prompt = (
+            f"Твой предыдущий ответ нарушает следующие инварианты проекта:\n"
+            f"{violation_list}\n\n"
+            f"Перепиши ответ, устранив все нарушения. "
+            f"Не используй запрещённые инструменты и зависимости.\n\n"
+            f"Исходный ответ:\n{answer}"
+        )
+        payload = {"model": self.model, "input": retry_prompt}
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.max_output_tokens is not None:
+            payload["max_output_tokens"] = self.max_output_tokens
+
+        try:
+            data, _ = self._post(payload)
+            if isinstance(data, dict) and not data.get("error"):
+                retry_text = data["output"][0]["content"][0]["text"]
+                passed, retry_violations = self.ltm.checker.check(retry_text)
+                if passed:
+                    return retry_text
+                # Second failure — return refusal
+                vlist = "\n".join(f"  - {v}" for v in retry_violations)
+                return (
+                    f"Не удалось сформировать ответ без нарушений инвариантов.\n"
+                    f"Нарушения:\n{vlist}"
+                )
+        except Exception:
+            pass
+        vlist = "\n".join(f"  - {v}" for v in violations)
+        return (
+            f"Ответ нарушает инварианты проекта и не может быть показан.\n"
+            f"Нарушения:\n{vlist}"
+        )
+
     # ---------------- Main interaction ----------------
 
     def reply(self, user_text: str):
-        """Send user message to LLM and return reply + metrics."""
+        """Send user message to LLM and return (reply, metrics)."""
         self.stm.messages.append({"role": "user", "text": user_text})
+
+        # Pre-check: warn if user query matches banned invariant patterns
+        pre_violations: list[str] = []
+        if self.ltm.invariants and self.ltm.checker.rules:
+            passed, pre_violations = self.ltm.checker.check(user_text)
 
         if self.context_strategy == "facts":
             self._update_facts(user_text)
@@ -880,10 +1055,20 @@ class Agent:
             except Exception:
                 text = json.dumps(data, ensure_ascii=False, indent=2)
 
+        # Post-check: enforce invariants on LLM answer
+        if self.ltm.invariants and self.ltm.checker.rules:
+            post_passed, post_violations = self.ltm.checker.check(text)
+            if not post_passed:
+                if self.tc.state == "PLANNING":
+                    # In PLANNING: replace answer with structured correction message
+                    text = self._planning_violation_message(post_violations)
+                else:
+                    # In other states: retry once with correction prompt
+                    text = self._retry_with_violations(text, post_violations)
+
         self.stm.messages.append({"role": "assistant", "text": text})
 
         usage = data.get("usage", {})
-
         in_tok = usage.get("input_tokens")
         out_tok = usage.get("output_tokens")
 
@@ -897,6 +1082,7 @@ class Agent:
             "in": in_tok,
             "out": out_tok,
             "cost": total_cost,
+            "pre_violations": pre_violations,
         }
 
         return text, metrics

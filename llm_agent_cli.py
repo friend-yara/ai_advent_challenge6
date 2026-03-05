@@ -148,6 +148,14 @@ Commands:
   /ltm reload              Reload LTM files from disk without restarting
   /whoami                  Short summary of current user profile (<=80 words)
 
+Notes:
+  Invariant checks run automatically:
+  - pre-check: warns if your query matches a banned pattern
+  - post-check (PLANNING): replaces violating LLM answers with a
+    correction message
+  - post-check (other states): retries LLM once with correction prompt
+  - on entering VALIDATION: auto-checks the plan against invariants
+
 Flags:
   --profile <name>           Profile to use (default: default).
                              All files default to profiles/<name>/.
@@ -339,6 +347,26 @@ def main():
                         print("/step — выполнить шаг | "
                               "/state PLAN — к планированию | "
                               "/exit — выйти")
+                    elif agent.tc.state == "VALIDATION":
+                        # Auto-check accumulated plan against invariants
+                        if agent.tc.plan and agent.ltm.invariants:
+                            plan_text = "\n".join(
+                                agent.tc.plan + agent.tc.done
+                            )
+                            v_passed, v_violations = (
+                                agent.ltm.checker.check(plan_text)
+                            )
+                            if not v_passed:
+                                print("[VALIDATION] Обнаружены нарушения "
+                                      "инвариантов в плане:")
+                                for v in v_violations:
+                                    print(f"  - {v}")
+                                print("Устраните нарушения перед переходом "
+                                      "в DONE.")
+                            else:
+                                print("[VALIDATION] План соответствует "
+                                      "инвариантам.")
+                        print("/state EXEC — исправить | /state DONE — завершить")
                     elif agent.tc.state == "DONE":
                         print("Задача завершена. Результаты ИИ следует "
                               "перепроверять вручную.")
@@ -383,7 +411,11 @@ def main():
                 print(f"[working] task={tc.task!r}, state={tc.state}, step={tc.step}/{tc.total}, current={tc.current!r}")
                 summary_flag = "yes" if agent.stm.summary else "no"
                 print(f"[stm]     messages={len(agent.stm.messages)}, summary={summary_flag}, facts={len(agent.facts)}, branch={agent.current_branch}")
-                print(f"[ltm]     {agent.ltm.summary_line()}")
+                checker_info = (
+                    f", checker={agent.ltm.checker.summary_line()}"
+                    if agent.ltm.invariants else ""
+                )
+                print(f"[ltm]     {agent.ltm.summary_line()}{checker_info}")
                 continue
             if text == "/checkpoint":
                 agent.checkpoint()
@@ -426,6 +458,14 @@ def main():
 
         try:
             answer, metrics = agent.reply(text)
+
+            # Print pre-check warnings if any banned patterns were detected
+            pre_violations = metrics.get("pre_violations", [])
+            if pre_violations:
+                print("[ВНИМАНИЕ] Запрос содержит упоминание "
+                      "запрещённых правил:")
+                for v in pre_violations:
+                    print(f"  - {v}")
 
             # In PLANNING: detect if LLM produced a todo checklist
             if agent.tc.state == "PLANNING":
