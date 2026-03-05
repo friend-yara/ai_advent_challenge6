@@ -1,0 +1,39 @@
+meta:
+  title: Project Invariants
+
+stack:
+  language: Python 3.12
+  platform: Ubuntu 24.04, SSH-only
+  shell: Bash 5.2
+  environment: "venv (.venv), PEP 668 compliant — no system-level pip installs"
+
+api:
+  endpoint: "https://api.openai.com/v1/responses"
+  sdk_allowed: false
+  http_client: requests only
+  api_key_source: OPENAI_API_KEY environment variable
+
+architecture:
+  core_files:
+    - agent.py
+    - llm_agent_cli.py
+  no_web_framework: true
+  no_gui: true
+  no_browser: true
+  minimal_dependencies: true
+  dependency_policy: add only when necessary, always pin versions
+  persistence: TOON file format only
+
+budget:
+  preferred_model: gpt-4.1-mini
+  heavy_model: gpt-4.1
+  token_efficiency: high — avoid redundant context
+
+banned:
+  - "No SDK wrappers (openai, langchain, etc.)"
+  - "No system-wide pip installs"
+  - "No GUI or browser-based tools"
+  - "No cloud storage or external APIs beyond OpenAI"
+  - "No OpenAI SDK — raw HTTP via requests only"
+  - "No web framework, no GUI, no browser"
+  - "No database — file-based persistence only (TOON format)"

@@ -108,7 +108,7 @@ def resolve_profile_paths(args: argparse.Namespace) -> argparse.Namespace:
     if args.project_memory_file is None:
         args.project_memory_file = str(profile_dir / "PROJECT_MEMORY.md")
     if args.invariants_file is None:
-        args.invariants_file = str(profile_dir / "INVARIANTS.md")
+        args.invariants_file = str(profile_dir / "INVARIANTS.yaml")
     return args
 
 

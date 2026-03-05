@@ -144,6 +144,76 @@ class Profile:
         return f"id={profile_id}, {status}"
 
 
+class Invariants:
+    """
+    Project invariants loaded from a YAML file.
+    Rendered as structured text for prompt injection.
+    Banned list is passed to InvariantChecker for rule enforcement.
+    """
+
+    _EXCLUDED_SECTIONS = ("meta",)
+
+    def __init__(self, path: str):
+        """Initialize with file path."""
+        self.path = path
+        self.data: dict = {}
+        self._loaded: bool = False
+
+    def load(self) -> str | None:
+        """Read and parse YAML file. Returns error string or None on success."""
+        if not self.path:
+            return None
+        p = Path(self.path)
+        if not p.exists():
+            return f"Invariants file not found: {self.path}"
+        try:
+            self.data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            self._loaded = True
+            return None
+        except Exception as e:
+            return f"Could not load invariants {self.path}: {e}"
+
+    def reload(self) -> str | None:
+        """Re-read the file from disk."""
+        self.data = {}
+        self._loaded = False
+        return self.load()
+
+    def to_text(self) -> str:
+        """
+        Render invariants as human-readable text for prompt injection.
+        Excludes the meta section. Each section becomes a header + items.
+        """
+        lines = []
+        for section, value in self.data.items():
+            if section in self._EXCLUDED_SECTIONS:
+                continue
+            header = section.replace("_", " ").title()
+            lines.append(f"{header}:")
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    if isinstance(v, list):
+                        lines.append(f"  {k}:")
+                        for item in v:
+                            lines.append(f"    - {item}")
+                    else:
+                        lines.append(f"  {k}: {v}")
+            elif isinstance(value, list):
+                for item in value:
+                    lines.append(f"  - {item}")
+            else:
+                lines.append(f"  {value}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def to_banned_lines(self) -> str:
+        """
+        Return only the banned list as '- No ...' lines for InvariantChecker.
+        """
+        banned = self.data.get("banned", [])
+        return "\n".join(f"- {item}" for item in banned)
+
+
 class LongTermMemory:
     """
     Long-term memory: profile, invariants, project context.
@@ -171,7 +241,8 @@ class LongTermMemory:
         # Cached content
         self.project_memory: str | None = None
         self.profile_obj: Profile | None = None
-        self.invariants: str | None = None
+        self.invariants_obj: Invariants | None = None
+        self.invariants: str | None = None   # rendered text cache
         self.checker: InvariantChecker = InvariantChecker()
 
     def _read_file(self, path: str) -> str | None:
@@ -197,14 +268,22 @@ class LongTermMemory:
                 print(f"[WARN] {err}", file=sys.stderr)
                 self.profile_obj = None
         if self.use_invariants:
-            self.invariants = self._read_file(self.invariants_file)
-            if self.invariants:
-                self.checker.load_from_text(self.invariants)
+            self.invariants_obj = Invariants(self.invariants_file)
+            err = self.invariants_obj.load()
+            if err:
+                print(f"[WARN] {err}", file=sys.stderr)
+                self.invariants_obj = None
+            else:
+                self.invariants = self.invariants_obj.to_text()
+                self.checker.load_from_text(
+                    self.invariants_obj.to_banned_lines()
+                )
 
     def reload(self):
         """Re-read LTM files from disk (clears cache first)."""
         self.project_memory = None
         self.profile_obj = None
+        self.invariants_obj = None
         self.invariants = None
         self.checker = InvariantChecker()
         self.load()
@@ -236,7 +315,10 @@ class LongTermMemory:
             p_status = self.profile_obj.summary_line() if self.profile_obj else "not loaded"
             parts.append(f"profile={p_status}")
         if self.use_invariants:
-            inv_status = self.checker.summary_line() if self.invariants else "not loaded"
+            if self.invariants_obj and self.invariants:
+                inv_status = self.checker.summary_line()
+            else:
+                inv_status = "not loaded"
             parts.append(f"invariants={inv_status}")
         return ", ".join(parts) if parts else "disabled"
 
