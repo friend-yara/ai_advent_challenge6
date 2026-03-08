@@ -348,24 +348,56 @@ def main():
                               "/state PLAN — к планированию | "
                               "/exit — выйти")
                     elif agent.tc.state == "VALIDATION":
-                        # Auto-check accumulated plan against invariants
-                        if agent.tc.plan and agent.ltm.invariants:
-                            plan_text = "\n".join(
-                                agent.tc.plan + agent.tc.done
+                        # Auto-check plan steps against invariants + profile
+                        check_parts = agent.tc.plan + agent.tc.done
+                        check_text = "\n".join(check_parts)
+
+                        all_passed = True
+
+                        if not check_parts:
+                            print("[VALIDATION] План пуст — нечего проверять.")
+                            all_passed = False
+                        else:
+                            # Check against INVARIANTS banned rules
+                            if agent.ltm.invariants and agent.ltm.checker.rules:
+                                v_passed, v_violations = (
+                                    agent.ltm.checker.check(check_text)
+                                )
+                                if not v_passed:
+                                    all_passed = False
+                                    print("[VALIDATION] Нарушения требований "
+                                          "и ограничений:")
+                                    for v in v_violations:
+                                        print(f"  - {v}")
+
+                            # Check against profile constraints (same checker,
+                            # covers sdk/gui/framework bans from profile too)
+                            if (agent.ltm.profile_obj
+                                    and agent.ltm.profile_obj.enabled
+                                    and agent.ltm.checker.rules):
+                                # Profile constraints overlap with invariants;
+                                # run a separate check only if invariants were
+                                # not loaded (avoid duplicate output)
+                                if not agent.ltm.invariants:
+                                    p_passed, p_violations = (
+                                        agent.ltm.checker.check(check_text)
+                                    )
+                                    if not p_passed:
+                                        all_passed = False
+                                        print("[VALIDATION] Нарушения "
+                                              "ограничений профиля:")
+                                        for v in p_violations:
+                                            print(f"  - {v}")
+
+                        if all_passed:
+                            print(
+                                "Проверка завершена, требования и ограничения "
+                                "соблюдены. Рекомендую перейти к завершению "
+                                "задачи."
                             )
-                            v_passed, v_violations = (
-                                agent.ltm.checker.check(plan_text)
-                            )
-                            if not v_passed:
-                                print("[VALIDATION] Обнаружены нарушения "
-                                      "инвариантов в плане:")
-                                for v in v_violations:
-                                    print(f"  - {v}")
-                                print("Устраните нарушения перед переходом "
-                                      "в DONE.")
-                            else:
-                                print("[VALIDATION] План соответствует "
-                                      "инвариантам.")
+                        else:
+                            print("Устраните нарушения перед переходом в DONE.")
+
                         print("/state EXEC — исправить | /state DONE — завершить")
                     elif agent.tc.state == "DONE":
                         print("Задача завершена. Результаты ИИ следует "
