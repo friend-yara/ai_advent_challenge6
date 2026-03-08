@@ -35,7 +35,7 @@ Main files:
 ## Agent Design
 
 State model:
-- stage: IDLE / PLAN / EXECUTE / REVIEW
+- stage: PLANNING / EXECUTION / VALIDATION / DONE
 - goal
 - plan
 - actions
