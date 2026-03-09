@@ -46,6 +46,7 @@ version in `requirements.txt`.
 Flags `--use-project-memory` and `--use-invariants` default to `True`.
 `--use-profile` is always `True` (not a CLI flag).
 `--agents-dir` defaults to `agents/` (project root).
+`--tools-dir` defaults to `tools/` (project root).
 
 ---
 
@@ -74,10 +75,13 @@ agent.py              Thin LLM caller — _post(), memory layers, persistence
 agents.py             AgentSpec dataclass + AgentRegistry (loads agents/*.md)
 context_builder.py    ContextBuilder — per-agent context assembly
 orchestrator.py       Orchestrator — agent selection, routing, invariant checks
+mcp_client.py         MCPClient — MCP Streamable HTTP client (pure requests)
 llm_agent_cli.py      CLI REPL — argparse, REPL loop, /commands
 system_prompt.txt     Fallback system prompt (used when no agent spec matched)
 pricing.json          Manual pricing table for token cost calculation
 requirements.txt      Pinned Python dependencies
+tools/
+  vkusvill.yaml       MCP server spec: ВкусВилл product search
 agents/
   planner.md          Primary agent — PLANNING, model=gpt-4.1-mini
   coder.md            Primary agent — EXECUTION, model=gpt-4.1
@@ -313,6 +317,8 @@ context_policy:
 | `/branch switch <name>` | Switch to branch, saving current state first |
 | `/ltm reload` | Reload LTM files from disk without restarting |
 | `/whoami` | LLM-generated summary of current profile (≤80 words) |
+| `/tool list` | List all configured MCP servers |
+| `/tool list <server>` | Connect to MCP server and print available tools |
 
 **State prompt labels:** `[PLAN:planner] >`, `[EXEC:coder] >`, `[VALI:validator] >`, `[DONE:fallback] >`
 
@@ -440,6 +446,31 @@ banned:
   - No system-wide pip installs
   - No GUI frameworks
 ```
+
+---
+
+## MCP Tool Servers
+
+MCP server specs live in `tools/*.yaml`. Each file describes one server:
+
+```yaml
+name: vkusvill
+url: https://mcp001.vkusvill.ru/mcp
+description: ВкусВилл — поиск товаров и формирование ссылки на корзину
+```
+
+`MCPClient` in `mcp_client.py` implements the **MCP Streamable HTTP**
+transport (spec version `2024-11-05`) using only `requests` — no MCP SDK,
+no extra dependencies.
+
+**Session lifecycle per call (stateless):**
+1. `POST <url>` with `initialize` → capture `Mcp-Session-Id` response header
+2. `POST <url>` with `notifications/initialized` (session header) → 202
+3. `POST <url>` with `tools/list` (session header) → tools JSON array
+
+**To add a new server:** create `tools/<name>.yaml` with `name` and `url`.
+The server is immediately available as `/tool list <name>` on next startup
+(or after reloading if hot-reload is added).
 
 ---
 

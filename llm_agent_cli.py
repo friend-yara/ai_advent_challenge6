@@ -28,6 +28,7 @@ from pathlib import Path
 from agent import Agent, LongTermMemory, load_pricing_models
 from agents import AgentRegistry
 from context_builder import ContextBuilder
+from mcp_client import MCPClient
 from orchestrator import Orchestrator
 
 # Optional multiline input (prompt_toolkit)
@@ -87,6 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
     # Agents directory
     p.add_argument("--agents-dir", default="agents",
                    help="Directory containing agent spec *.md files")
+
+    # MCP tools directory
+    p.add_argument("--tools-dir", default="tools",
+                   help="Directory containing MCP server spec *.yaml files")
 
     return p
 
@@ -149,6 +154,8 @@ Commands:
   /branch switch <name>    Switch to branch, saving current first
   /ltm reload              Reload LTM files from disk without restarting
   /whoami                  Short LLM-generated summary of current profile
+  /tool list               List all configured MCP servers
+  /tool list <server>      Connect to MCP server and show available tools
 
 Prompt format: [STATE:agent] >
   Example: [PLAN:planner] > or [EXEC:coder] >
@@ -222,7 +229,12 @@ def main():
     registry.load(args.agents_dir)
     orchestrator = Orchestrator(agent, registry, ContextBuilder(), pricing)
 
+    # Build MCP client
+    mcp = MCPClient(args.tools_dir)
+    mcp.load()
+
     print(f"Agents loaded: {registry.summary()}")
+    print(f"MCP servers:   {mcp.summary()}")
 
     # Auto-load working state on startup (if file exists)
     state_was_loaded = False
@@ -488,6 +500,7 @@ def main():
                 print(f"[ltm]     {agent.ltm.summary_line()}{checker_info}")
                 print(f"[orch]    agents={registry.summary()}, "
                       f"active={orchestrator.current_agent_name()}")
+                print(f"[mcp]     {mcp.summary()}")
                 continue
             if text == "/checkpoint":
                 agent.checkpoint()
@@ -525,6 +538,76 @@ def main():
                 else:
                     print("Usage: /branch list | /branch create <name> | "
                           "/branch switch <name>")
+                continue
+            if text.startswith("/tool"):
+                parts = text.split(maxsplit=2)
+                sub = parts[1].strip() if len(parts) > 1 else ""
+                srv = parts[2].strip() if len(parts) > 2 else ""
+                if sub == "list" and not srv:
+                    # List configured servers
+                    servers = mcp.list_servers()
+                    if not servers:
+                        print("Нет настроенных MCP-серверов "
+                              f"(каталог: {args.tools_dir})")
+                    else:
+                        print(f"MCP-серверы ({len(servers)}):")
+                        for s in servers:
+                            print(f"  {s['name']:<16} {s['url']}")
+                            if s.get("description"):
+                                print(f"                   {s['description']}")
+                elif sub == "list" and srv:
+                    # Connect to server and show tools
+                    spec = mcp.get_server(srv)
+                    if spec is None:
+                        known = ", ".join(
+                            s["name"] for s in mcp.list_servers()
+                        ) or "(нет)"
+                        print(f"ERROR: сервер '{srv}' не найден. "
+                              f"Доступны: {known}")
+                    else:
+                        print(f"Сервер: {spec['name']}  ({spec['url']})")
+                        if spec.get("description"):
+                            print(f"  {spec['description']}")
+                        print("Получение списка инструментов...")
+                        try:
+                            tools = mcp.list_tools(srv)
+                            if not tools:
+                                print("  (инструментов не найдено)")
+                            else:
+                                print(f"\nИнструменты ({len(tools)}):\n")
+                                for t in tools:
+                                    name = t.get("name", "?")
+                                    title = t.get("title") or "—"
+                                    desc = t.get("description", "")
+                                    print(f"  {name}")
+                                    print(f"    Title:       {title}")
+                                    if desc:
+                                        # Wrap long descriptions at 72 chars
+                                        words = desc.split()
+                                        line, out = "", []
+                                        for w in words:
+                                            if len(line) + len(w) + 1 > 72:
+                                                out.append(line)
+                                                line = w
+                                            else:
+                                                line = (
+                                                    f"{line} {w}"
+                                                    if line else w
+                                                )
+                                        if line:
+                                            out.append(line)
+                                        indent = "    Description: "
+                                        cont   = "                 "
+                                        for i, ln in enumerate(out):
+                                            pfx = indent if i == 0 else cont
+                                            print(f"{pfx}{ln}")
+                                    print()
+                        except Exception as e:
+                            print(f"ERROR: {e}", file=sys.stderr)
+                else:
+                    print("Использование:")
+                    print("  /tool list              — список MCP-серверов")
+                    print("  /tool list <сервер>     — инструменты сервера")
                 continue
             print("Unknown command")
             continue
