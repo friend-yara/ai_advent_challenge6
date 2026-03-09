@@ -45,6 +45,7 @@ version in `requirements.txt`.
 
 Flags `--use-project-memory` and `--use-invariants` default to `True`.
 `--use-profile` is always `True` (not a CLI flag).
+`--agents-dir` defaults to `agents/` (project root).
 
 ---
 
@@ -69,19 +70,28 @@ pytest tests/test_agent.py::test_function_name -v
 ## Architecture
 
 ```
-agent.py                  Core Agent class — LLM calls, memory, persistence
-llm_agent_cli.py          CLI REPL — argparse, REPL loop, /commands
-system_prompt.txt         External system prompt (loaded at runtime)
-pricing.json              Manual pricing table for token cost calculation
-requirements.txt          Pinned Python dependencies
+agent.py              Thin LLM caller — _post(), memory layers, persistence
+agents.py             AgentSpec dataclass + AgentRegistry (loads agents/*.md)
+context_builder.py    ContextBuilder — per-agent context assembly
+orchestrator.py       Orchestrator — agent selection, routing, invariant checks
+llm_agent_cli.py      CLI REPL — argparse, REPL loop, /commands
+system_prompt.txt     Fallback system prompt (used when no agent spec matched)
+pricing.json          Manual pricing table for token cost calculation
+requirements.txt      Pinned Python dependencies
+agents/
+  planner.md          Primary agent — PLANNING, model=gpt-4.1-mini
+  coder.md            Primary agent — EXECUTION, model=gpt-4.1
+  validator.md        Primary agent — VALIDATION, model=gpt-4.1-mini
+  research.md         Subagent — PLANNING+EXECUTION, model=gpt-4.1-mini
+  reviewer.md         Subagent — EXECUTION+VALIDATION, model=gpt-4.1-mini
 profiles/
   default/
-    PROFILE.json          User profile (JSON, rendered as YAML)
-    INVARIANTS.yaml       Stack/arch/budget/banned constraints (YAML)
-    PROJECT_MEMORY.md     Project context document (plain text)
-    state.toon            Working memory — gitignored
-    short_term.toon       Dialogue history — gitignored
-  <name>/                 Additional user profiles (same structure)
+    PROFILE.json      User profile (JSON, rendered as YAML)
+    INVARIANTS.yaml   Stack/arch/budget/banned constraints (YAML)
+    PROJECT_MEMORY.md Project context document (plain text)
+    state.toon        Working memory — gitignored
+    short_term.toon   Dialogue history — gitignored
+  <name>/             Additional user profiles (same structure)
 ```
 
 ---
@@ -130,7 +140,7 @@ for prompt injection (section headers + items, `meta` excluded).
 ### `InvariantChecker`
 Parses banned rules from `Invariants.to_banned_lines()`. Matches lines of the
 form `- No <keyword>`. Each keyword maps to regex patterns
-(`_KEYWORD_PATTERNS`). Two check points in `reply()`:
+(`_KEYWORD_PATTERNS`). Two check points in `Orchestrator.reply()`:
 - **Pre-check:** soft warn if user query matches banned patterns; LLM still
   called. Violations returned in `metrics["pre_violations"]`.
 - **Post-check:** if LLM answer matches banned patterns:
@@ -141,7 +151,6 @@ form `- No <keyword>`. Each keyword maps to regex patterns
 ### `LongTermMemory`
 Loads `Profile`, `PROJECT_MEMORY.md`, `INVARIANTS.yaml` into process cache.
 Never persisted to disk. Holds `InvariantChecker` instance (`self.checker`).
-`blocks(task_state)` returns `(name, content)` pairs to inject.
 `reload()` re-reads all files without restarting.
 
 ### `TaskContext`
@@ -156,19 +165,128 @@ Current dialogue only (`messages` list + `summary` string). Serialised to
 `short_term.toon` separately from working state.
 
 ### `Agent`
-Composes all layers. Key methods:
-- `reply(user_text)` — main interaction; runs pre/post invariant checks.
-- `run_step()` — executes one plan step in EXECUTION state via LLM.
-- `welcome_back()` — LLM-generated resume message shown on startup with saved
-  state.
+Thin LLM caller. Does NOT build prompts or route messages — that is
+`ContextBuilder` + `Orchestrator`'s job. Key methods:
+- `_post(payload)` — HTTP call to OpenAI Responses API with retry.
+- `welcome_back()` — LLM-generated resume message shown on startup.
 - `whoami(profile_name)` — LLM-generated profile summary (≤80 words).
 - `plan_from_reply(text)` — parses `[ ] step` / `1. step` lists from LLM reply.
 - `format_todo()` — renders plan as `[x]/[ ]` checklist.
 - `reset_working()` / `reset_short_term()` — layer-specific resets.
 - `save_state` / `load_state` / `save_short_term` / `load_short_term` — TOON
   persistence (working and STM stored in separate files).
+- `_compress_history_if_needed()` — compresses STM into summary when overflow.
 - Backward-compat `@property` shims: `goal`, `plan`, `actions`, `notes`
   delegate to `self.tc`.
+
+---
+
+## Key Classes in `agents.py`
+
+### `ContextPolicy`
+Dataclass declaring which context layers an agent receives. Fields:
+`include_profile`, `include_invariants`, `include_project_memory`,
+`include_state`, `include_history`, `history_limit`, `include_rules_block`,
+`include_validation_block`, `include_summary`, `include_facts`,
+`include_task`, `include_plan_summary`.
+
+### `AgentSpec`
+Dataclass loaded from an `agents/*.md` file. Fields: `name`, `mode`
+(`primary`|`subagent`), `description`, `model`, `temperature`, `when_to_use`,
+`allowed_states`, `context_policy`, `prompt`.
+
+### `AgentRegistry`
+Loads and indexes `AgentSpec` objects from `agents/*.md`.
+- `load(agents_dir)` — scans directory, parses YAML front-matter.
+- `get(name)` — lookup by name.
+- `for_state(state)` — returns first primary agent whose `allowed_states`
+  contains the given state.
+- `list_all()` / `list_primaries()` — enumeration.
+
+---
+
+## Key Classes in `context_builder.py`
+
+### `ContextBuilder`
+Assembles the LLM prompt string from live state layers, guided by an
+`AgentSpec.context_policy`. Replaces the old `Agent._build_prompt`.
+
+```
+build(spec, user_text, tc, stm, ltm, facts) -> str
+```
+
+Block injection order (each conditional on `context_policy`):
+```
+SYSTEM → PROFILE → PROJECT_MEMORY → INVARIANTS → STATE → RULES
+       → VALIDATION → SUMMARY → FACTS → DIALOG → Assistant:
+```
+
+---
+
+## Key Classes in `orchestrator.py`
+
+### `Orchestrator`
+Routes user messages to specialized agents, composes context, calls LLM,
+enforces invariants. Wraps `Agent` without modifying it.
+
+- `reply(user_text, agent_name=None)` — auto-selects or uses pinned agent,
+  builds context, calls LLM, runs pre/post invariant checks.
+- `run_step()` — executes one EXECUTION step via the `coder` agent.
+- `pin_agent(name)` — pins an agent for the next turn only.
+- `current_agent_name()` — returns the name of the agent that would be
+  selected right now.
+
+**Auto-selection (state-based):**
+
+| State | Primary agent | Model |
+|---|---|---|
+| PLANNING | planner | gpt-4.1-mini |
+| EXECUTION | coder | gpt-4.1 |
+| VALIDATION | validator | gpt-4.1-mini |
+| DONE | fallback | (agent default) |
+
+**Context per agent (what gets injected):**
+
+| Agent | profile | invariants | project_mem | state | history | rules | validation |
+|---|---|---|---|---|---|---|---|
+| planner | ✓ | ✓ | ✓ | ✓ | 4 msgs | ✗ | ✗ |
+| research | ✗ | ✗ | ✓ | task only | ✗ | ✗ | ✗ |
+| coder | ✓ | ✓ | ✗ | ✓ | 4 msgs | ✓ | ✗ |
+| reviewer | ✓ | ✓ | ✗ | plan+done | ✗ | ✗ | ✗ |
+| validator | ✗ | ✓ | ✗ | ✓ | ✗ | ✗ | ✓ |
+
+---
+
+## Agent Spec File Format (`agents/*.md`)
+
+Each file is a Markdown document with a YAML front-matter block. The text
+after the closing `---` becomes the agent's system prompt.
+
+```markdown
+---
+name: planner
+mode: primary           # primary | subagent
+description: ...
+model: gpt-4.1-mini
+temperature: 0.3
+when_to_use: ...
+allowed_states:
+  - PLANNING
+context_policy:
+  include_profile: true
+  include_invariants: true
+  include_project_memory: true
+  include_state: true
+  include_history: true
+  history_limit: 4
+  include_rules_block: false
+  include_validation_block: false
+  include_summary: true
+  include_facts: false
+---
+
+Ты — агент-планировщик. ...
+```
 
 ---
 
@@ -185,7 +303,9 @@ Composes all layers. Key methods:
 | `/goal <text>` | Alias for `/task` |
 | `/state <s>` | Transition state: `PLANNING`/`PLAN`, `EXECUTION`/`EXEC`, `VALIDATION`/`VALI`, `DONE` |
 | `/step` | Execute next step (EXECUTION state only) |
-| `/show` | Display working memory + STM status |
+| `/agent <name>` | Pin agent for next message only |
+| `/agent list` | List all available agents with model and states |
+| `/show` | Display working memory + STM + orchestrator status |
 | `/system <text>` | Override system prompt for this session |
 | `/checkpoint` | Save snapshot of current branch |
 | `/branch list` | List all branches (`*` = active) |
@@ -194,7 +314,7 @@ Composes all layers. Key methods:
 | `/ltm reload` | Reload LTM files from disk without restarting |
 | `/whoami` | LLM-generated summary of current profile (≤80 words) |
 
-**State prompt labels:** `[PLAN] >`, `[EXEC] >`, `[VALI] >`, `[DONE] >`
+**State prompt labels:** `[PLAN:planner] >`, `[EXEC:coder] >`, `[VALI:validator] >`, `[DONE:fallback] >`
 
 **Auto-behaviours:**
 - On startup with saved state: prints `welcome_back()` message and state hints.

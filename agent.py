@@ -38,7 +38,7 @@ def load_pricing_models(script_dir: Optional[Path] = None) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data.get("models", {}) or {}
     except Exception:
-        print(f"[WARN] pricing.json not found, cost calculation disabled")
+        print("[WARN] pricing.json not found, cost calculation disabled")
         return {}
 
 
@@ -288,24 +288,6 @@ class LongTermMemory:
         self.checker = InvariantChecker()
         self.load()
 
-    def blocks(self, task_state: str) -> list[tuple[str, str]]:
-        """
-        Return list of (block_name, content) to inject into the prompt.
-        Injection rules:
-          - PROFILE: always, if loaded and enabled (rendered as YAML)
-          - PROJECT_MEMORY: always, if loaded
-          - INVARIANTS: always if loaded; mandatory when task_state == EXECUTION
-        Returns only non-empty blocks.
-        """
-        result = []
-        if self.use_profile and self.profile_obj and self.profile_obj.enabled:
-            result.append((self.profile_obj.inject_as, self.profile_obj.to_yaml()))
-        if self.use_project_memory and self.project_memory:
-            result.append(("PROJECT_MEMORY", self.project_memory))
-        if self.use_invariants and self.invariants:
-            result.append(("INVARIANTS", self.invariants))
-        return result
-
     def summary_line(self) -> str:
         """One-line status for /show."""
         parts = []
@@ -339,7 +321,7 @@ class InvariantRule:
 class InvariantChecker:
     """
     Checks text (user queries, LLM answers) against loaded invariant rules.
-    Rules are parsed from INVARIANTS.md at load time. No extra API calls.
+    Rules are parsed from INVARIANTS.yaml at load time. No extra API calls.
     """
 
     # Mapping from known ban keywords to regex patterns
@@ -367,7 +349,7 @@ class InvariantChecker:
         self.last_result: tuple[bool, list[str]] = (True, [])
 
     def load_from_text(self, text: str):
-        """Parse InvariantRule list from INVARIANTS.md content."""
+        """Parse InvariantRule list from banned lines text."""
         self.rules = []
         for line in text.splitlines():
             stripped = line.strip()
@@ -492,10 +474,17 @@ class ShortTermMemory:
 
 class Agent:
     """
-    Minimal LLM agent with:
-    - short-term, working, and long-term memory layers
-    - TaskContext state machine
-    - TOON persistence
+    Thin LLM caller with memory layers and TOON persistence.
+
+    Responsibilities:
+    - HTTP calls to OpenAI Responses API (_post)
+    - State machine and persistence (TaskContext, TOON files)
+    - Short-term and long-term memory storage
+    - History compression (_compress_history_if_needed)
+    - Utility methods: welcome_back, whoami, format_todo, plan_from_reply
+
+    Prompt building and agent routing are handled by ContextBuilder +
+    Orchestrator — not by this class.
     """
 
     def __init__(
@@ -531,19 +520,19 @@ class Agent:
         self.print_json = print_json
         self.pricing = pricing or {}
 
-        # Day 9: summary compression flag (config, not state)
+        # Summary compression flag (config, not state)
         self.context_summary = context_summary
 
-        # Day 11: long-term memory layer (loaded externally, injected on demand)
+        # Long-term memory layer (loaded externally, injected on demand)
         self.ltm: LongTermMemory = ltm or LongTermMemory()
 
-        # Day 11: short-term memory layer
+        # Short-term memory layer
         self.stm = ShortTermMemory(
             history_limit=self.history_limit,
             summary_chunk_size=10,
         )
 
-        # Day 11: working memory layer
+        # Working memory layer
         self.tc = TaskContext()
 
         # Persistent state (working memory — remaining fields)
@@ -690,77 +679,6 @@ class Agent:
             self.branches = {"main": self._snapshot()}
             self.current_branch = "main"
 
-    # ---------------- Prompt building ----------------
-    def _select_context_messages(self) -> list[dict]:
-        """
-        Select which messages to include in the prompt depending on context strategy.
-        Currently implemented:
-          - window: Sliding Window (last N messages)
-          - facts: Sliding Window + FACTS block (injected in _build_prompt)
-          - branch: Sliding Window within the active branch (branches managed via CLI)
-        """
-        if not self.history_limit:
-            return []
-        # All strategies use a sliding window over the active short-term messages
-        return self.stm.messages[-self.history_limit:]
-
-
-    def _update_facts(self, user_text: str):
-        """Parse 'Key: Value' lines from user message and update facts store."""
-        for line in user_text.splitlines():
-            if ": " in line:
-                key, _, value = line.partition(": ")
-                key = key.strip()
-                value = value.strip()
-                if key:
-                    self.facts[key] = value
-
-    def _build_prompt(self, user_text: str) -> str:
-        """Build full prompt with state and history."""
-        parts = []
-        parts.append("SYSTEM:\n" + self.system_prompt.strip())
-
-        # Long-term memory blocks (injected before STATE, after SYSTEM)
-        for block_name, content in self.ltm.blocks(self.tc.state):
-            parts.append(f"\n{block_name}:\n{content}")
-
-        parts.append("\nSTATE (TOON v3.0):\n" + toons.dumps(self.tc.to_dict()).strip())
-
-        if self.tc.current:
-            parts.append(
-                "\nRULES:\n"
-                f"- Work only within the current step: {self.tc.current}\n"
-                "- Do not skip steps\n"
-                "- When step is complete, signal next_step"
-            )
-
-        if self.tc.state == "VALIDATION" and self.ltm.invariants:
-            parts.append(
-                "\nVALIDATION:\n"
-                "Check the completed steps and this answer against INVARIANTS. "
-                "Report any violations explicitly with the rule text and "
-                "a suggested fix."
-            )
-
-        if self.context_summary and self.stm.summary:
-            parts.append("\nSUMMARY:\n" + self.stm.summary.strip())
-
-        if self.context_strategy == "facts" and self.facts:
-            facts_lines = "\n".join(f"{k}={v}" for k, v in self.facts.items())
-            parts.append("\nFACTS:\n" + facts_lines)
-
-        parts.append("\nDIALOG:")
-        recent = self._select_context_messages()
-        for m in recent:
-            role = m["role"]
-            text = m["text"]
-            if role == "user":
-                parts.append(f"User: {text}")
-            else:
-                parts.append(f"Assistant: {text}")
-        parts.append("Assistant:")
-        return "\n".join(parts)
-
     # ---------------- Task state machine helpers ----------------
 
     def reset_working(self):
@@ -805,51 +723,43 @@ class Agent:
                 steps.append(m.group(1).strip())
         return steps if len(steps) >= 2 else None
 
-    def run_step(self) -> str:
-        """
-        Execute the current step in EXECUTION state via LLM.
-        Advances tc.step, tc.done, tc.current. Returns LLM reply text.
-        """
-        if self.tc.step >= self.tc.total:
-            return "Все шаги уже выполнены."
+    # ---------------- Profile summary ----------------
 
-        current_step = self.tc.plan[self.tc.step]
-        step_prompt = (
-            f"Выполни шаг {self.tc.step + 1} из {self.tc.total}: {current_step}\n"
-            f"Задача: {self.tc.task}\n"
-            "Выполни только этот шаг. Не переходи к следующим."
+    def whoami(self, profile_name: str) -> str:
+        """Return a short LLM-generated summary of the current user profile."""
+        sections = []
+        if self.ltm.profile_obj and self.ltm.profile_obj.enabled:
+            sections.append("PROFILE:\n" + self.ltm.profile_obj.to_yaml())
+        if self.ltm.project_memory:
+            sections.append("PROJECT_MEMORY:\n" + self.ltm.project_memory)
+        if self.ltm.invariants:
+            sections.append("INVARIANTS:\n" + self.ltm.invariants)
+
+        if not sections:
+            return f"Профиль «{profile_name}»: данные не загружены."
+
+        context = "\n\n".join(sections)
+        prompt = (
+            f"Ты — ассистент. На основе данных профиля пользователя "
+            f"«{profile_name}» напиши краткое описание на русском языке. "
+            f"Максимум 80 слов. Только факты из данных, без выдумок.\n\n"
+            f"{context}"
         )
-        self.stm.messages.append({"role": "user", "text": step_prompt})
-        self._compress_history_if_needed()
-        prompt = self._build_prompt(step_prompt)
-
-        payload = {"model": self.model, "input": prompt}
-        if self.temperature is not None:
-            payload["temperature"] = self.temperature
-        if self.max_output_tokens is not None:
-            payload["max_output_tokens"] = self.max_output_tokens
-
+        payload = {
+            "model": self.model,
+            "input": prompt,
+            "temperature": 0,
+            "max_output_tokens": 150,
+        }
         data, _ = self._post(payload)
         if isinstance(data, dict) and data.get("error"):
             err = data.get("error") or {}
             msg = err.get("message") if isinstance(err, dict) else str(err)
-            raise RuntimeError(msg or "API error (run_step)")
+            raise RuntimeError(msg or "API error (whoami)")
         try:
-            text = data["output"][0]["content"][0]["text"]
+            return data["output"][0]["content"][0]["text"].strip()
         except Exception:
-            text = json.dumps(data, ensure_ascii=False)
-
-        self.stm.messages.append({"role": "assistant", "text": text})
-
-        # Advance state
-        self.tc.done.append(current_step)
-        self.tc.step += 1
-        if self.tc.step < self.tc.total:
-            self.tc.current = self.tc.plan[self.tc.step]
-        else:
-            self.tc.current = ""
-
-        return text
+            return f"Профиль «{profile_name}»: не удалось получить ответ."
 
     def welcome_back(self) -> str:
         """
@@ -896,44 +806,6 @@ class Agent:
             + (f": {step_info}" if step_info else ".")
         )
 
-    # ---------------- Profile summary ----------------
-
-    def whoami(self, profile_name: str) -> str:
-        """Return a short LLM-generated summary of the current user profile."""
-        sections = []
-        if self.ltm.profile_obj and self.ltm.profile_obj.enabled:
-            sections.append("PROFILE:\n" + self.ltm.profile_obj.to_yaml())
-        if self.ltm.project_memory:
-            sections.append("PROJECT_MEMORY:\n" + self.ltm.project_memory)
-        if self.ltm.invariants:
-            sections.append("INVARIANTS:\n" + self.ltm.invariants)
-
-        if not sections:
-            return f"Профиль «{profile_name}»: данные не загружены."
-
-        context = "\n\n".join(sections)
-        prompt = (
-            f"Ты — ассистент. На основе данных профиля пользователя "
-            f"«{profile_name}» напиши краткое описание на русском языке. "
-            f"Максимум 80 слов. Только факты из данных, без выдумок.\n\n"
-            f"{context}"
-        )
-        payload = {
-            "model": self.model,
-            "input": prompt,
-            "temperature": 0,
-            "max_output_tokens": 150,
-        }
-        data, _ = self._post(payload)
-        if isinstance(data, dict) and data.get("error"):
-            err = data.get("error") or {}
-            msg = err.get("message") if isinstance(err, dict) else str(err)
-            raise RuntimeError(msg or "API error (whoami)")
-        try:
-            return data["output"][0]["content"][0]["text"].strip()
-        except Exception:
-            return f"Профиль «{profile_name}»: не удалось получить ответ."
-
     # ---------------- Summary compression ----------------
 
     def _summarize_messages(self, messages: list[dict]) -> str:
@@ -972,6 +844,7 @@ class Agent:
             return (self.stm.summary or "").strip()
 
     def _compress_history_if_needed(self):
+        """Compress STM history into summary when overflow threshold is reached."""
         if not self.context_summary:
             return
         if not self.history_limit or self.history_limit <= 0:
@@ -989,7 +862,7 @@ class Agent:
     # ---------------- API call ----------------
 
     def _post(self, payload: dict):
-        """Send request with retry."""
+        """Send request to OpenAI Responses API with retry on timeout."""
         retries = 3
         delay = 2
         start = time.monotonic()
@@ -1012,159 +885,3 @@ class Agent:
                 time.sleep(delay)
                 delay *= 2
         return {}, 0.0
-
-    # ---------------- Invariant enforcement ----------------
-
-    def _zero_metrics(self) -> dict:
-        """Return empty metrics dict for responses that skip the LLM."""
-        return {
-            "model": self.model,
-            "time": 0.0,
-            "in": 0,
-            "out": 0,
-            "cost": "$0.000000",
-        }
-
-    def _planning_violation_message(self, violations: list[str]) -> str:
-        """
-        Return a correction message for PLANNING state when LLM answer
-        contains invariant violations. Does not call the LLM.
-        """
-        lines = [
-            "Ответ содержит нарушения инвариантов проекта:\n"
-        ]
-        for i, v in enumerate(violations, 1):
-            lines.append(f"  Правило {i}: «{v}»")
-        lines.append(
-            "\nПожалуйста, переформулируй план без использования "
-            "запрещённых инструментов и зависимостей.\n"
-            "Ограничения: только requests, venv, без SDK и внешних фреймворков."
-        )
-        return "\n".join(lines)
-
-    def _pre_check_warning(self, violations: list[str]) -> str:
-        """Return a warning string for user queries that match banned patterns."""
-        lines = ["[ВНИМАНИЕ] Запрос содержит упоминание запрещённых правил:"]
-        for v in violations:
-            lines.append(f"  - {v}")
-        return "\n".join(lines)
-
-    def _retry_with_violations(self, answer: str, violations: list[str]) -> str:
-        """
-        Retry the LLM once with an explicit correction prompt.
-        If retry also fails invariant check, return a refusal string.
-        """
-        violation_list = "\n".join(f"  - {v}" for v in violations)
-        retry_prompt = (
-            f"Твой предыдущий ответ нарушает следующие инварианты проекта:\n"
-            f"{violation_list}\n\n"
-            f"Перепиши ответ, устранив все нарушения. "
-            f"Не используй запрещённые инструменты и зависимости.\n\n"
-            f"Исходный ответ:\n{answer}"
-        )
-        payload = {"model": self.model, "input": retry_prompt}
-        if self.temperature is not None:
-            payload["temperature"] = self.temperature
-        if self.max_output_tokens is not None:
-            payload["max_output_tokens"] = self.max_output_tokens
-
-        try:
-            data, _ = self._post(payload)
-            if isinstance(data, dict) and not data.get("error"):
-                retry_text = data["output"][0]["content"][0]["text"]
-                passed, retry_violations = self.ltm.checker.check(retry_text)
-                if passed:
-                    return retry_text
-                # Second failure — return refusal
-                vlist = "\n".join(f"  - {v}" for v in retry_violations)
-                return (
-                    f"Не удалось сформировать ответ без нарушений инвариантов.\n"
-                    f"Нарушения:\n{vlist}"
-                )
-        except Exception:
-            pass
-        vlist = "\n".join(f"  - {v}" for v in violations)
-        return (
-            f"Ответ нарушает инварианты проекта и не может быть показан.\n"
-            f"Нарушения:\n{vlist}"
-        )
-
-    # ---------------- Main interaction ----------------
-
-    def reply(self, user_text: str):
-        """Send user message to LLM and return (reply, metrics)."""
-        self.stm.messages.append({"role": "user", "text": user_text})
-
-        # Pre-check: warn if user query matches banned invariant patterns
-        pre_violations: list[str] = []
-        if self.ltm.invariants and self.ltm.checker.rules:
-            passed, pre_violations = self.ltm.checker.check(user_text)
-
-        if self.context_strategy == "facts":
-            self._update_facts(user_text)
-
-        # Day 9: compress history before building prompt
-        self._compress_history_if_needed()
-
-        prompt = self._build_prompt(user_text)
-
-        payload = {
-            "model": self.model,
-            "input": prompt,
-        }
-        if self.temperature is not None:
-            payload["temperature"] = self.temperature
-        if self.max_output_tokens is not None:
-            payload["max_output_tokens"] = self.max_output_tokens
-        if self.stop:
-            payload["stop"] = self.stop
-
-        data, elapsed = self._post(payload)
-
-        if isinstance(data, dict) and data.get("error") is not None:
-            err = data.get("error") or {}
-            msg = err.get("message") if isinstance(err, dict) else str(err)
-            raise RuntimeError(msg or "API error")
-
-        if not isinstance(data, dict):
-            raise RuntimeError(f"Unexpected API response type: {type(data)}")
-
-        if self.print_json:
-            text = json.dumps(data, ensure_ascii=False, indent=2)
-        else:
-            try:
-                text = data["output"][0]["content"][0]["text"]
-            except Exception:
-                text = json.dumps(data, ensure_ascii=False, indent=2)
-
-        # Post-check: enforce invariants on LLM answer
-        if self.ltm.invariants and self.ltm.checker.rules:
-            post_passed, post_violations = self.ltm.checker.check(text)
-            if not post_passed:
-                if self.tc.state == "PLANNING":
-                    # In PLANNING: replace answer with structured correction message
-                    text = self._planning_violation_message(post_violations)
-                else:
-                    # In other states: retry once with correction prompt
-                    text = self._retry_with_violations(text, post_violations)
-
-        self.stm.messages.append({"role": "assistant", "text": text})
-
-        usage = data.get("usage", {})
-        in_tok = usage.get("input_tokens")
-        out_tok = usage.get("output_tokens")
-
-        in_cost, out_cost, total_cost = compute_cost(
-            self.pricing, self.model, in_tok, out_tok
-        )
-
-        metrics = {
-            "model": self.model,
-            "time": elapsed,
-            "in": in_tok,
-            "out": out_tok,
-            "cost": total_cost,
-            "pre_violations": pre_violations,
-        }
-
-        return text, metrics

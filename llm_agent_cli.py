@@ -1,31 +1,23 @@
 #!/usr/bin/env python3
 """
-Simple LLM Agent (CLI)
+LLM Agent CLI — orchestrator-based REPL.
 
-System prompt file (default):
-  ./system_prompt.txt
+Demo flow (orchestrator + agents):
+  [PLAN] > Реализуй функцию parse_csv на Python
+      → planner selected (state=PLANNING, model=gpt-4.1-mini)
+      → context: profile + invariants + project_memory + state + history(4)
 
-Example workflow:
+  /state EXEC
+  [EXEC] > /step
+      → coder selected (state=EXECUTION, model=gpt-4.1)
+      → context: profile + invariants + state + history(4) + RULES
 
-1) Start agent:
-   $ python llm_agent_cli.py
+  /state VALI
+      → validator selected (state=VALIDATION, model=gpt-4.1-mini)
+      → context: invariants + state + VALIDATION block (no profile, no history)
 
-2) Set task:
-   > /task Write a learning plan for LLM basics
-
-3) Switch to execution state:
-   > /state EXECUTION
-   > Start with step 1
-
-4) Validate result:
-   > /state VALIDATION
-   > Check if the plan is realistic
-
-5) Save state:
-   > /save
-
-6) Exit:
-   > /exit
+  /agent research    — pin research agent for next message only
+  /agent list        — list all available agents
 """
 
 import os
@@ -34,6 +26,9 @@ import argparse
 from pathlib import Path
 
 from agent import Agent, LongTermMemory, load_pricing_models
+from agents import AgentRegistry
+from context_builder import ContextBuilder
+from orchestrator import Orchestrator
 
 # Optional multiline input (prompt_toolkit)
 try:
@@ -54,7 +49,7 @@ def load_system_prompt(path: str) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI arguments."""
-    p = argparse.ArgumentParser("Stage-based LLM agent")
+    p = argparse.ArgumentParser("Orchestrator-based LLM agent")
 
     p.add_argument("-m", "--model", default="gpt-4.1")
     p.add_argument("-t", "--temperature", type=float)
@@ -89,6 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--use-project-memory", action="store_true", default=True)
     p.add_argument("--use-invariants", action="store_true", default=True)
 
+    # Agents directory
+    p.add_argument("--agents-dir", default="agents",
+                   help="Directory containing agent spec *.md files")
+
     return p
 
 
@@ -112,70 +111,71 @@ def resolve_profile_paths(args: argparse.Namespace) -> argparse.Namespace:
     return args
 
 
-def state_prompt(tc) -> str:
-    """Return state-labeled prompt prefix, e.g. '[PLAN] > '."""
+def state_prompt(tc, orchestrator: Orchestrator) -> str:
+    """Return state-labeled prompt with active agent name, e.g. '[PLAN:planner] > '."""
     labels = {
-        "PLANNING":   "[PLAN]",
-        "EXECUTION":  "[EXEC]",
-        "VALIDATION": "[VALI]",
-        "DONE":       "[DONE]",
+        "PLANNING":   "PLAN",
+        "EXECUTION":  "EXEC",
+        "VALIDATION": "VALI",
+        "DONE":       "DONE",
     }
-    label = labels.get(tc.state, f"[{tc.state[:4]}]")
-    return f"{label} > "
+    label = labels.get(tc.state, tc.state[:4])
+    agent_name = orchestrator.current_agent_name()
+    return f"[{label}:{agent_name}] > "
 
 
 def print_help():
-    """Print compact CLI help with example workflow."""
+    """Print compact CLI help."""
     print(
         """
 Commands:
-  /exit                    Exit the agent (progress saved automatically)
+  /exit                    Exit (progress saved automatically)
   /help                    Show this help
   /reset                   Clear working memory + dialogue, save both files
   /save                    Save working state to state.toon
   /load                    Load working state from state.toon
-  /goal                    Set task description (alias for /task)
+  /goal <text>             Set task description (alias for /task)
   /task <text>             Set task in working memory
-  /state <s>               Transition state: PLANNING|EXEC|EXECUTION|
-                           VALIDATION|VALI|DONE
+  /state <s>               Transition state: PLANNING|PLAN, EXECUTION|EXEC,
+                           VALIDATION|VALI, DONE
   /step                    Execute next step (EXECUTION state only)
-  /system                  Override system prompt temporarily
-  /show                    Display working memory + STM (two lines)
+  /agent <name>            Pin agent for next message only
+  /agent list              List all available agents
+  /system <text>           Override system prompt temporarily
+  /show                    Display working memory + STM status
   /checkpoint              Save snapshot of current branch
   /branch list             List all branches (* = active)
   /branch create <name>    Create new branch from current state
   /branch switch <name>    Switch to branch, saving current first
   /ltm reload              Reload LTM files from disk without restarting
-  /whoami                  Short summary of current user profile (<=80 words)
+  /whoami                  Short LLM-generated summary of current profile
 
-Notes:
-  Invariant checks run automatically:
-  - pre-check: warns if your query matches a banned pattern
-  - post-check (PLANNING): replaces violating LLM answers with a
-    correction message
-  - post-check (other states): retries LLM once with correction prompt
-  - on entering VALIDATION: auto-checks the plan against invariants
+Prompt format: [STATE:agent] >
+  Example: [PLAN:planner] > or [EXEC:coder] >
 
-Flags:
-  --profile <name>           Profile to use (default: default).
-                             All files default to profiles/<name>/.
-                             Missing files are silently skipped.
-  --short-term-file          Override short-term memory file path
-  --no-auto-load-short-term  Skip loading short_term.toon at startup
-  --no-auto-save-short-term  Skip saving short_term.toon after each turn
-  --project-memory-file      Override project memory file path
-  --invariants-file          Override invariants file path
-  --use-project-memory       Inject PROJECT_MEMORY into prompt
-  --use-invariants           Inject INVARIANTS into prompt
+Agent auto-selection:
+  PLANNING  → planner
+  EXECUTION → coder
+  VALIDATION → validator
+  (override with /agent <name> for one message)
 
-System prompt file:
-  ./system_prompt.txt
+Invariant checks:
+  - pre-check: warns if query matches a banned pattern
+  - post-check (PLANNING): replaces violating answers with correction message
+  - post-check (other): retries LLM once with correction prompt
+  - on /state VALIDATION: auto-checks plan against invariants
 """
     )
 
+
 def print_metrics(m: dict):
-    """Print metrics."""
-    print(f" ({m['time']:.2f} s, in={m['in']}, out={m['out']}, cost={m['cost']})\n")
+    """Print turn metrics including agent name."""
+    agent = m.get("agent", "?")
+    print(
+        f" ({m['time']:.2f}s, agent={agent}, model={m['model']}, "
+        f"in={m['in']}, out={m['out']}, cost={m['cost']})\n"
+    )
+
 
 def main():
     """Run REPL."""
@@ -216,6 +216,13 @@ def main():
         context_summary=args.context_summary,
         ltm=ltm,
     )
+
+    # Build agent registry + orchestrator
+    registry = AgentRegistry()
+    registry.load(args.agents_dir)
+    orchestrator = Orchestrator(agent, registry, ContextBuilder(), pricing)
+
+    print(f"Agents loaded: {registry.summary()}")
 
     # Auto-load working state on startup (if file exists)
     state_was_loaded = False
@@ -276,7 +283,7 @@ def main():
 
     while True:
         try:
-            prompt_str = state_prompt(agent.tc)
+            prompt_str = state_prompt(agent.tc, orchestrator)
             if session is not None:
                 with patch_stdout():
                     text = session.prompt(
@@ -415,7 +422,7 @@ def main():
                           "/state PLAN — перепланировать")
                     continue
                 try:
-                    answer = agent.run_step()
+                    answer, metrics = orchestrator.run_step()
                     print(answer)
                     print()
                     print(agent.format_todo())
@@ -428,11 +435,35 @@ def main():
                         print("/step — выполнить | "
                               "/state PLAN — к планированию | "
                               "/exit — выйти")
+                    print_metrics(metrics)
                     agent.save_state(args.state)
                     if not args.no_auto_save_short_term:
                         agent.save_short_term(args.short_term_file)
                 except Exception as e:
                     print(f"ERROR: {e}", file=sys.stderr)
+                continue
+            if text.startswith("/agent"):
+                parts = text.split(maxsplit=1)
+                sub = parts[1].strip() if len(parts) > 1 else ""
+                if sub == "list" or sub == "":
+                    for spec in registry.list_all():
+                        marker = "*" if spec.mode == "primary" else " "
+                        active = (
+                            " ← active"
+                            if spec.name == orchestrator.current_agent_name()
+                            else ""
+                        )
+                        print(
+                            f"  {marker} {spec.name:<12} "
+                            f"[{spec.mode}] {spec.model}  "
+                            f"states={spec.allowed_states}{active}"
+                        )
+                else:
+                    err = orchestrator.pin_agent(sub)
+                    if err:
+                        print(f"ERROR: {err}")
+                    else:
+                        print(f"OK: next message will use agent='{sub}'")
                 continue
             if text.startswith("/system "):
                 agent.set_system_prompt(text[8:].strip())
@@ -440,14 +471,23 @@ def main():
                 continue
             if text == "/show":
                 tc = agent.tc
-                print(f"[working] task={tc.task!r}, state={tc.state}, step={tc.step}/{tc.total}, current={tc.current!r}")
+                print(
+                    f"[working] task={tc.task!r}, state={tc.state}, "
+                    f"step={tc.step}/{tc.total}, current={tc.current!r}"
+                )
                 summary_flag = "yes" if agent.stm.summary else "no"
-                print(f"[stm]     messages={len(agent.stm.messages)}, summary={summary_flag}, facts={len(agent.facts)}, branch={agent.current_branch}")
+                print(
+                    f"[stm]     messages={len(agent.stm.messages)}, "
+                    f"summary={summary_flag}, facts={len(agent.facts)}, "
+                    f"branch={agent.current_branch}"
+                )
                 checker_info = (
                     f", checker={agent.ltm.checker.summary_line()}"
                     if agent.ltm.invariants else ""
                 )
                 print(f"[ltm]     {agent.ltm.summary_line()}{checker_info}")
+                print(f"[orch]    agents={registry.summary()}, "
+                      f"active={orchestrator.current_agent_name()}")
                 continue
             if text == "/checkpoint":
                 agent.checkpoint()
@@ -483,13 +523,14 @@ def main():
                     except ValueError as e:
                         print(f"ERROR: {e}")
                 else:
-                    print("Usage: /branch list | /branch create <name> | /branch switch <name>")
+                    print("Usage: /branch list | /branch create <name> | "
+                          "/branch switch <name>")
                 continue
             print("Unknown command")
             continue
 
         try:
-            answer, metrics = agent.reply(text)
+            answer, metrics = orchestrator.reply(text)
 
             # Print pre-check warnings if any banned patterns were detected
             pre_violations = metrics.get("pre_violations", [])
