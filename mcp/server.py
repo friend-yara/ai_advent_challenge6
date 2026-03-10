@@ -163,7 +163,7 @@ class MCPHandler(BaseHTTPRequestHandler):
 
     # Silence default access log; we print our own
     def log_message(self, format, *args):  # noqa: A002
-        print(f"[MCP] {self.address_string()} {format % args}", file=sys.stdout)
+        pass
 
     def do_POST(self):
         if self.path != "/mcp":

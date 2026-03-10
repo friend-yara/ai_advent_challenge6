@@ -176,12 +176,8 @@ Invariant checks:
 
 
 def print_metrics(m: dict):
-    """Print turn metrics including agent name."""
-    agent = m.get("agent", "?")
-    print(
-        f" ({m['time']:.2f}s, agent={agent}, model={m['model']}, "
-        f"in={m['in']}, out={m['out']}, cost={m['cost']})\n"
-    )
+    """Print turn metrics: token counts and cost only."""
+    print(f" (in={m['in']}, out={m['out']}, cost={m['cost']})\n")
 
 
 def main():

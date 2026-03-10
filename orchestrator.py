@@ -178,10 +178,10 @@ class Orchestrator:
                 else:
                     text = self._retry_with_violations(text, post_violations, spec)
 
-        # Append server tag(s) if MCP tools were used
+        # Append server tag(s) if MCP tools were used (same line as answer)
         if servers_used:
             tag = " ".join(f"#{s}" for s in servers_used)
-            text = f"{text}\n\n{tag}"
+            text = f"{text} {tag}"
 
         stm.messages.append({"role": "assistant", "text": text})
 
