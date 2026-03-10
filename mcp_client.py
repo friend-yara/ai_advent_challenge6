@@ -8,17 +8,25 @@ Implements the 2024-11-05 MCP Streamable HTTP transport using only the
 Session lifecycle per call (stateless — no session is reused):
   1. POST <url>  initialize           → captures Mcp-Session-Id from headers
   2. POST <url>  notifications/initialized  (session header, no id)  → 202
-  3. POST <url>  tools/list           (session header)  → tools array
+  3. POST <url>  tools/list or tools/call  (session header)
 
 Server specs are loaded from *.yaml files in a configurable directory
 (default: tools/). Each file must contain at minimum: name, url.
 
+Tool schemas are fetched and cached at load() time so the orchestrator can
+pass them to the LLM as OpenAI function definitions without extra round-trips.
+
 Usage:
     mcp = MCPClient("tools/")
     mcp.load()
+
+    # Inspect tools
     tools = mcp.list_tools("vkusvill")
-    for t in tools:
-        print(t["name"], t.get("description", ""))
+    llm_tools = mcp.all_tools_for_llm()
+
+    # Call a tool
+    result = mcp.call_tool("weather", "get_forecast", {"place": "London", "days": 3})
+    print(result)
 """
 
 import sys
@@ -42,31 +50,55 @@ class MCPClient:
     Minimal MCP client for the Streamable HTTP transport.
 
     Loads server specs from a directory of *.yaml files.
-    Each call to list_tools() opens a fresh session (initialize → tools/list).
-    No persistent sessions, no background threads, no extra dependencies.
+    Tool schemas are fetched and cached at load() time for LLM function calling.
+    Each individual call (list_tools, call_tool) opens a fresh stateless session.
     """
 
     def __init__(self, servers_dir: str | Path = "tools"):
         """Initialize with path to server spec directory."""
         self.servers_dir = Path(servers_dir)
-        self._servers: dict[str, dict] = {}   # name -> {name, url, description}
+        self._servers: dict[str, dict] = {}          # name -> {name, url, description}
+        self._tools_cache: dict[str, list[dict]] = {} # server_name -> tools list
 
     def load(self):
         """
-        Scan servers_dir for *.yaml files and load each as a server spec.
-        Skips files with missing required fields (warns to stderr).
+        Scan servers_dir for *.yaml files, load each as a server spec,
+        and pre-fetch tool schemas from reachable servers.
+        Servers that are unreachable at startup are skipped with a WARN.
         """
         self._servers = {}
+        self._tools_cache = {}
+
         if not self.servers_dir.is_dir():
             print(
                 f"[WARN] MCP servers dir not found: {self.servers_dir}",
                 file=sys.stderr,
             )
             return
+
         for path in sorted(self.servers_dir.glob("*.yaml")):
             spec = self._load_file(path)
-            if spec is not None:
-                self._servers[spec["name"]] = spec
+            if spec is None:
+                continue
+            self._servers[spec["name"]] = spec
+
+            # Pre-fetch tools (skip unreachable servers silently)
+            try:
+                tools = self._fetch_tools(spec["url"])
+                self._tools_cache[spec["name"]] = tools
+            except requests.exceptions.ConnectionError:
+                print(
+                    f"[WARN] MCP server '{spec['name']}' unreachable at startup "
+                    f"— tools not cached ({spec['url']})",
+                    file=sys.stderr,
+                )
+                self._tools_cache[spec["name"]] = []
+            except Exception as e:
+                print(
+                    f"[WARN] Could not fetch tools from '{spec['name']}': {e}",
+                    file=sys.stderr,
+                )
+                self._tools_cache[spec["name"]] = []
 
     def _load_file(self, path: Path) -> dict | None:
         """Parse a single server spec YAML file. Returns None on error."""
@@ -99,11 +131,7 @@ class MCPClient:
 
     def list_tools(self, server_name: str) -> list[dict]:
         """
-        Connect to the named MCP server and return its tool list.
-
-        Each tool dict contains at minimum: name, description.
-        Optionally: title, inputSchema, and any other server-provided fields.
-
+        Connect to the named MCP server and return its tool list (fresh session).
         Returns empty list on any error (error already printed to stderr).
         """
         spec = self._servers.get(server_name)
@@ -115,19 +143,13 @@ class MCPClient:
             )
             return []
 
-        url = spec["url"]
         try:
-            session_id = self._initialize(url)
-            self._notify_initialized(url, session_id)
-            return self._tools_list(url, session_id)
+            return self._fetch_tools(spec["url"])
         except requests.exceptions.ConnectionError as e:
             print(f"ERROR: Cannot connect to MCP server '{server_name}': {e}")
             return []
         except requests.exceptions.Timeout:
-            print(
-                f"ERROR: Timeout connecting to MCP server '{server_name}' "
-                f"({url})"
-            )
+            print(f"ERROR: Timeout connecting to MCP server '{server_name}'")
             return []
         except RuntimeError as e:
             print(f"ERROR: MCP error from '{server_name}': {e}")
@@ -135,6 +157,77 @@ class MCPClient:
         except Exception as e:
             print(f"ERROR: Unexpected error from MCP server '{server_name}': {e}")
             return []
+
+    def call_tool(
+        self, server_name: str, tool_name: str, arguments: dict
+    ) -> str:
+        """
+        Call a tool on the named MCP server and return its result as text.
+
+        Opens a fresh MCP session (initialize → notifications/initialized →
+        tools/call). Returns the text from content[0]["text"] in the result.
+
+        Raises RuntimeError if the server returns an error.
+        Raises requests.exceptions.ConnectionError if the server is unreachable.
+        """
+        spec = self._servers.get(server_name)
+        if spec is None:
+            raise RuntimeError(
+                f"MCP server '{server_name}' not found in loaded servers"
+            )
+
+        url = spec["url"]
+        session_id = self._initialize(url)
+        self._notify_initialized(url, session_id)
+        result = self._tools_call(url, session_id, tool_name, arguments)
+
+        # Extract text from MCP content array
+        content = result.get("content", [])
+        if content and isinstance(content, list):
+            first = content[0]
+            if isinstance(first, dict):
+                return first.get("text", str(first))
+        # Fallback: return structured data as text
+        return str(result.get("data", result))
+
+    def all_tools_for_llm(self) -> list[dict]:
+        """
+        Return all cached tools as OpenAI Responses API function definitions.
+
+        Each entry has the standard OpenAI format plus an internal
+        '_mcp_server' key (stripped before sending to the API) so the
+        orchestrator can route tool calls back to the right server.
+        """
+        result: list[dict] = []
+        for server_name, tools in self._tools_cache.items():
+            for t in tools:
+                result.append({
+                    "type": "function",
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get(
+                        "inputSchema",
+                        {"type": "object", "properties": {}},
+                    ),
+                    "_mcp_server": server_name,  # internal routing key
+                })
+        return result
+
+    def find_tool_server(self, tool_name: str) -> str | None:
+        """Return the server name that provides the named tool, or None."""
+        for server_name, tools in self._tools_cache.items():
+            for t in tools:
+                if t["name"] == tool_name:
+                    return server_name
+        return None
+
+    def tools_summary(self) -> str:
+        """One-line summary of cached tools across all servers."""
+        total = sum(len(t) for t in self._tools_cache.values())
+        if total == 0:
+            return "0 tool(s) available"
+        names = [t["name"] for tools in self._tools_cache.values() for t in tools]
+        return f"{total} tool(s): {', '.join(names)}"
 
     def summary(self) -> str:
         """One-line summary of loaded servers."""
@@ -157,9 +250,8 @@ class MCPClient:
 
     def _initialize(self, url: str) -> str:
         """
-        Send MCP initialize request.
-        Returns the session ID from the Mcp-Session-Id response header.
-        Raises RuntimeError if the server returns an error or no session ID.
+        Send MCP initialize. Returns session ID from Mcp-Session-Id header.
+        Raises RuntimeError if server returns error or no session ID.
         """
         payload = {
             "jsonrpc": "2.0",
@@ -191,27 +283,24 @@ class MCPClient:
     def _notify_initialized(self, url: str, session_id: str):
         """
         Send notifications/initialized to complete the MCP handshake.
-        This is a notification (no 'id' field) — server responds with 202.
+        Notification (no 'id') — server responds with 202.
         """
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-        }
+        payload = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         resp = self._post(url, payload, session_id=session_id)
-        # 202 Accepted is the expected response; anything else is tolerated
-        # (some servers may return 200 with no body)
         if resp.status_code not in (200, 202, 204):
             print(
-                f"[WARN] notifications/initialized returned "
-                f"HTTP {resp.status_code}",
+                f"[WARN] notifications/initialized returned HTTP {resp.status_code}",
                 file=sys.stderr,
             )
 
+    def _fetch_tools(self, url: str) -> list[dict]:
+        """Open a session, fetch tools/list, return the tools array."""
+        session_id = self._initialize(url)
+        self._notify_initialized(url, session_id)
+        return self._tools_list(url, session_id)
+
     def _tools_list(self, url: str, session_id: str) -> list[dict]:
-        """
-        Send tools/list request and return the tools array.
-        Raises RuntimeError on JSON-RPC error responses.
-        """
+        """Send tools/list and return the tools array."""
         payload = {
             "jsonrpc": "2.0",
             "id": 2,
@@ -229,3 +318,27 @@ class MCPClient:
 
         result = data.get("result", {})
         return result.get("tools", [])
+
+    def _tools_call(
+        self, url: str, session_id: str, tool_name: str, arguments: dict
+    ) -> dict:
+        """Send tools/call and return the result dict from JSON-RPC response."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments,
+            },
+        }
+        resp = self._post(url, payload, session_id=session_id)
+        resp.raise_for_status()
+
+        data = resp.json()
+        if "error" in data:
+            err = data["error"]
+            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            raise RuntimeError(f"tools/call '{tool_name}' failed: {msg}")
+
+        return data.get("result", {})

@@ -227,14 +227,15 @@ def main():
     # Build agent registry + orchestrator
     registry = AgentRegistry()
     registry.load(args.agents_dir)
-    orchestrator = Orchestrator(agent, registry, ContextBuilder(), pricing)
-
-    # Build MCP client
+    # Build MCP client (loads server specs + pre-fetches tool schemas)
     mcp = MCPClient(args.tools_dir)
     mcp.load()
 
+    orchestrator = Orchestrator(agent, registry, ContextBuilder(), pricing, mcp=mcp)
+
     print(f"Agents loaded: {registry.summary()}")
     print(f"MCP servers:   {mcp.summary()}")
+    print(f"MCP tools:     {mcp.tools_summary()}")
 
     # Auto-load working state on startup (if file exists)
     state_was_loaded = False

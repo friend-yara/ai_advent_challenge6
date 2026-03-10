@@ -3,7 +3,8 @@
 orchestrator.py — Orchestrator.
 
 Routes user messages to specialized agents based on the current task state,
-builds context precisely per agent spec, and enforces invariants.
+builds context precisely per agent spec, calls the LLM, enforces invariants,
+and executes MCP tool calls when the LLM requests them.
 
 Demo flow:
   [PLAN] > Реализуй функцию parse_csv на Python
@@ -18,10 +19,16 @@ Demo flow:
   /state VALI
       → validator selected (state=VALIDATION, model=gpt-4.1-mini)
       → context: invariants + state + VALIDATION block (no profile, no history)
+
+  [PLAN] > Какая погода в Лондоне завтра?
+      → planner selected
+      → LLM call 1: requests tool get_forecast(place=London, days=1)
+      → MCPClient.call_tool("weather", "get_forecast", {...})
+      → LLM call 2: formulates final answer with weather data
+      → answer ends with  #weather
 """
 
 import json
-import re
 import sys
 
 from agents import AgentRegistry, AgentSpec
@@ -31,23 +38,26 @@ from context_builder import ContextBuilder
 class Orchestrator:
     """
     Selects the appropriate agent for the current task state,
-    composes a precise context, calls the LLM, and enforces invariants.
+    composes a precise context, calls the LLM, enforces invariants,
+    and executes MCP tool calls when the LLM requests them.
 
     Wraps Agent (for _post, state, memory) without modifying it.
     """
 
     def __init__(
         self,
-        agent,            # Agent instance (thin caller + state)
+        agent,                  # Agent instance (thin caller + state)
         registry: AgentRegistry,
         context_builder: ContextBuilder,
         pricing: dict,
+        mcp=None,               # MCPClient | None
     ):
         """Initialize orchestrator with all collaborators."""
         self.agent = agent
         self.registry = registry
         self.ctx = context_builder
         self.pricing = pricing
+        self.mcp = mcp
         # Pinned agent for the next turn only (set via /agent <name>)
         self._pinned_agent: str | None = None
 
@@ -57,6 +67,8 @@ class Orchestrator:
               ) -> tuple[str, dict]:
         """
         Process a user message: select agent → build context → call LLM.
+        If the LLM requests tool calls and MCP is configured, execute them
+        and make a second LLM call with the results injected.
 
         Parameters
         ----------
@@ -93,17 +105,22 @@ class Orchestrator:
         if ltm.invariants and ltm.checker.rules:
             _, pre_violations = ltm.checker.check(user_text)
 
-        # Build context
+        # Build tools list for LLM (planner only, if MCP is available)
+        tools_for_llm = self._build_tools_list(spec)
+
+        # Build context prompt
         prompt = self.ctx.build(spec, user_text, tc, stm, ltm, ag.facts)
 
-        # Call LLM
-        payload = {"model": spec.model, "input": prompt}
+        # ---------- LLM call 1 ----------
+        payload: dict = {"model": spec.model, "input": prompt}
         if spec.temperature is not None:
             payload["temperature"] = spec.temperature
         if ag.max_output_tokens is not None:
             payload["max_output_tokens"] = ag.max_output_tokens
         if ag.stop:
             payload["stop"] = ag.stop
+        if tools_for_llm:
+            payload["tools"] = tools_for_llm
 
         data, elapsed = ag._post(payload)
 
@@ -115,13 +132,42 @@ class Orchestrator:
         if not isinstance(data, dict):
             raise RuntimeError(f"Unexpected API response type: {type(data)}")
 
+        # Detect tool calls in the response
+        output_items: list[dict] = data.get("output", [])
+        tool_call_items = [
+            item for item in output_items
+            if isinstance(item, dict) and item.get("type") == "function_call"
+        ]
+
+        servers_used: list[str] = []
+
+        if tool_call_items and self.mcp:
+            # ---------- Execute tool calls ----------
+            tool_results: list[tuple[dict, str]] = []
+            for tc_item in tool_call_items:
+                result_text, server_name = self._execute_tool_call(tc_item)
+                tool_results.append((tc_item, result_text))
+                if server_name and server_name not in servers_used:
+                    servers_used.append(server_name)
+
+            # ---------- LLM call 2 with tool results ----------
+            data2, elapsed2 = self._call_with_tool_results(
+                spec, user_text, tool_results, tools_for_llm, ag
+            )
+            elapsed += elapsed2
+
+            if isinstance(data2, dict) and data2.get("error") is not None:
+                err = data2.get("error") or {}
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                raise RuntimeError(msg or "API error (tool result call)")
+
+            data = data2
+
+        # Extract final text
         if ag.print_json:
             text = json.dumps(data, ensure_ascii=False, indent=2)
         else:
-            try:
-                text = data["output"][0]["content"][0]["text"]
-            except Exception:
-                text = json.dumps(data, ensure_ascii=False, indent=2)
+            text = _extract_text(data)
 
         # Post-check invariants
         if ltm.invariants and ltm.checker.rules:
@@ -130,18 +176,19 @@ class Orchestrator:
                 if tc.state == "PLANNING":
                     text = _planning_violation_message(post_violations)
                 else:
-                    text = self._retry_with_violations(
-                        text, post_violations, spec
-                    )
+                    text = self._retry_with_violations(text, post_violations, spec)
+
+        # Append server tag(s) if MCP tools were used
+        if servers_used:
+            tag = " ".join(f"#{s}" for s in servers_used)
+            text = f"{text}\n\n{tag}"
 
         stm.messages.append({"role": "assistant", "text": text})
 
         usage = data.get("usage", {}) if isinstance(data, dict) else {}
         in_tok = usage.get("input_tokens")
         out_tok = usage.get("output_tokens")
-        _, _, total_cost = _compute_cost(
-            self.pricing, spec.model, in_tok, out_tok
-        )
+        _, _, total_cost = _compute_cost(self.pricing, spec.model, in_tok, out_tok)
 
         metrics = {
             "model": spec.model,
@@ -184,7 +231,7 @@ class Orchestrator:
 
         prompt = self.ctx.build(spec, step_prompt, tc, stm, ltm, ag.facts)
 
-        payload = {"model": spec.model, "input": prompt}
+        payload: dict = {"model": spec.model, "input": prompt}
         if spec.temperature is not None:
             payload["temperature"] = spec.temperature
         if ag.max_output_tokens is not None:
@@ -196,11 +243,7 @@ class Orchestrator:
             msg = err.get("message") if isinstance(err, dict) else str(err)
             raise RuntimeError(msg or "API error (run_step)")
 
-        try:
-            text = data["output"][0]["content"][0]["text"]
-        except Exception:
-            text = json.dumps(data, ensure_ascii=False)
-
+        text = _extract_text(data)
         stm.messages.append({"role": "assistant", "text": text})
 
         # Advance task state
@@ -242,6 +285,99 @@ class Orchestrator:
         spec = self.registry.for_state(self.agent.tc.state)
         return spec.name if spec else "(none)"
 
+    # ---------------- MCP tool calling ----------------
+
+    def _build_tools_list(self, spec: AgentSpec) -> list[dict]:
+        """
+        Return OpenAI function definitions for all available MCP tools.
+        Only provided to the planner agent; returns [] for all others.
+        Internal '_mcp_server' keys are stripped before sending to the API.
+        """
+        if self.mcp is None or spec.name != "planner":
+            return []
+        raw = self.mcp.all_tools_for_llm()
+        if not raw:
+            return []
+        # Strip internal routing key before sending to OpenAI
+        return [
+            {k: v for k, v in tool.items() if not k.startswith("_")}
+            for tool in raw
+        ]
+
+    def _execute_tool_call(self, tc_item: dict) -> tuple[str, str | None]:
+        """
+        Execute a single function_call item from the LLM output via MCPClient.
+
+        Returns (result_text, server_name).
+        On any error returns (error_description, None).
+        """
+        tool_name = tc_item.get("name", "")
+        raw_args = tc_item.get("arguments", "{}")
+        try:
+            arguments = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except json.JSONDecodeError:
+            arguments = {}
+
+        server_name = self.mcp.find_tool_server(tool_name)
+        if server_name is None:
+            return (
+                f"Tool '{tool_name}' is not available on any configured MCP server.",
+                None,
+            )
+
+        try:
+            result = self.mcp.call_tool(server_name, tool_name, arguments)
+            return result, server_name
+        except Exception as e:
+            print(f"[WARN] Tool call '{tool_name}' failed: {e}", file=sys.stderr)
+            return f"Tool call failed: {e}", None
+
+    def _call_with_tool_results(
+        self,
+        spec: AgentSpec,
+        user_text: str,
+        tool_results: list[tuple[dict, str]],
+        tools_for_llm: list[dict],
+        ag,
+    ) -> tuple[dict, float]:
+        """
+        Make a second LLM call with tool results injected as input items.
+
+        The input is an array with:
+          - the original user message
+          - one function_call item per tool call
+          - one function_call_output item per tool result
+        """
+        input_items: list[dict] = [{"role": "user", "content": user_text}]
+
+        for tc_item, result_text in tool_results:
+            # Replay the function_call the LLM made
+            input_items.append({
+                "type": "function_call",
+                "name": tc_item["name"],
+                "call_id": tc_item["call_id"],
+                "arguments": tc_item.get("arguments", "{}"),
+            })
+            # Inject our tool execution result
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": tc_item["call_id"],
+                "output": result_text,
+            })
+
+        payload: dict = {
+            "model": spec.model,
+            "input": input_items,
+        }
+        if tools_for_llm:
+            payload["tools"] = tools_for_llm
+        if spec.temperature is not None:
+            payload["temperature"] = spec.temperature
+        if ag.max_output_tokens is not None:
+            payload["max_output_tokens"] = ag.max_output_tokens
+
+        return ag._post(payload)
+
     # ---------------- Internals ----------------
 
     def _select_spec(self, name: str | None, state: str) -> AgentSpec:
@@ -254,8 +390,8 @@ class Orchestrator:
             if spec:
                 return spec
             print(
-                f"[WARN] Agent '{name}' not found, falling back to state-based "
-                f"selection",
+                f"[WARN] Agent '{name}' not found, falling back to "
+                f"state-based selection",
                 file=sys.stderr,
             )
 
@@ -263,7 +399,6 @@ class Orchestrator:
         if spec:
             return spec
 
-        # Ultimate fallback — bare minimal spec using agent's model
         print(
             f"[WARN] No primary agent for state '{state}', using default model",
             file=sys.stderr,
@@ -282,14 +417,14 @@ class Orchestrator:
             f"Не используй запрещённые инструменты и зависимости.\n\n"
             f"Исходный ответ:\n{answer}"
         )
-        payload = {"model": spec.model, "input": retry_prompt}
+        payload: dict = {"model": spec.model, "input": retry_prompt}
         if spec.temperature is not None:
             payload["temperature"] = spec.temperature
 
         try:
             data, _ = self.agent._post(payload)
             if isinstance(data, dict) and not data.get("error"):
-                retry_text = data["output"][0]["content"][0]["text"]
+                retry_text = _extract_text(data)
                 passed, retry_violations = self.agent.ltm.checker.check(retry_text)
                 if passed:
                     return retry_text
@@ -313,6 +448,21 @@ class Orchestrator:
 
 
 # ---------------- Module-level helpers ----------------
+
+def _extract_text(data: dict) -> str:
+    """Extract reply text from an OpenAI Responses API response dict."""
+    try:
+        output = data.get("output", [])
+        for item in output:
+            if isinstance(item, dict) and item.get("type") == "message":
+                content = item.get("content", [])
+                if content and isinstance(content, list):
+                    return content[0].get("text", "")
+        # Fallback: try legacy shape
+        return data["output"][0]["content"][0]["text"]
+    except Exception:
+        return json.dumps(data, ensure_ascii=False, indent=2)
+
 
 def _planning_violation_message(violations: list[str]) -> str:
     """Return a correction message for PLANNING state invariant violations."""
