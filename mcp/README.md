@@ -9,10 +9,10 @@ Implements one tool: **get_forecast** — weather forecast via Open-Meteo (free,
 
 ```bash
 # Default: 127.0.0.1:8000
-python mcp/server.py
+python mcp/mcp_weather.py
 
 # Custom host/port
-python mcp/server.py --host 0.0.0.0 --port 9000
+python mcp/mcp_weather.py --host 0.0.0.0 --port 9000
 ```
 
 ## MCP endpoint
