@@ -9,11 +9,15 @@ Implements one tool: **get_forecast** — weather forecast via Open-Meteo (free,
 
 ```bash
 # Default: 127.0.0.1:8000
-python mcp/mcp_weather.py
+python mcp/server.py
 
 # Custom host/port
-python mcp/mcp_weather.py --host 0.0.0.0 --port 9000
+python mcp/server.py --host 0.0.0.0 --port 9000
 ```
+
+The weather tool is served via the router in `mcp/server.py`.
+`mcp/mcp_weather.py` is a domain module — it contains the weather logic
+and is imported by the router, not run directly.
 
 ## MCP endpoint
 
