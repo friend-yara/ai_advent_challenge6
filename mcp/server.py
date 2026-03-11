@@ -3,7 +3,6 @@
 mcp/server.py — MCP router: single endpoint, multiple domain modules.
 
 Serves all tools via one /mcp endpoint by delegating to domain modules.
-Add a new domain module in three steps (see "Extending" below).
 
 Usage:
     python mcp/server.py                   # 127.0.0.1:8000
@@ -12,10 +11,10 @@ Usage:
 
 MCP endpoint: http://127.0.0.1:8000/mcp
 
-Extending — add mcp/mcp_scheduler.py:
-    1. Create mcp/mcp_scheduler.py with SCHEDULER_TOOLS and dispatch_scheduler_tool
+Extending — add a new domain module (e.g. mcp/mcp_notes.py):
+    1. Create mcp/mcp_notes.py with NOTES_TOOLS and dispatch_notes_tool()
     2. Import them below
-    3. Add to ALL_TOOLS and _DISPATCH
+    3. Add to ALL_TOOLS and _DISPATCH (2 lines)
 """
 
 import os
@@ -31,23 +30,21 @@ from mcp.base import (
     MCPBaseHandler,
     run_server,
 )
+from mcp.mcp_scheduler import SCHEDULER_TOOLS, dispatch_scheduler_tool, init_scheduler
 from mcp.mcp_weather import WEATHER_TOOLS, dispatch_weather_tool
 
 # ---------------------------------------------------------------------------
-# Tool registry
+# Tool registry — add new domain modules here
 # ---------------------------------------------------------------------------
-# To add a new domain module:
-#   from mcp.mcp_scheduler import SCHEDULER_TOOLS, dispatch_scheduler_tool
-#   ALL_TOOLS = [*WEATHER_TOOLS, *SCHEDULER_TOOLS]
-#   _DISPATCH.update({t["name"]: dispatch_scheduler_tool for t in SCHEDULER_TOOLS})
 
 ALL_TOOLS: list[dict] = [
     *WEATHER_TOOLS,
+    *SCHEDULER_TOOLS,
 ]
 
 _DISPATCH: dict[str, object] = {
-    t["name"]: dispatch_weather_tool
-    for t in WEATHER_TOOLS
+    **{t["name"]: dispatch_weather_tool   for t in WEATHER_TOOLS},
+    **{t["name"]: dispatch_scheduler_tool for t in SCHEDULER_TOOLS},
 }
 
 # ---------------------------------------------------------------------------
@@ -64,7 +61,8 @@ class RouterMCPHandler(MCPBaseHandler):
     SERVER_VERSION = "0.1"
     INSTRUCTIONS   = (
         "Local MCP router. "
-        "Available tools: weather forecast (get_forecast)."
+        "Available tools: weather forecast (get_forecast), "
+        "scheduler reminders (reminder)."
     )
     TOOLS = ALL_TOOLS   # used by run_server() for startup display
 
@@ -94,4 +92,5 @@ class RouterMCPHandler(MCPBaseHandler):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    init_scheduler()
     run_server(RouterMCPHandler)

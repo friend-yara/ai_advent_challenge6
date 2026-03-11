@@ -160,12 +160,16 @@ class MCPClient:
 
     def call_tool(
         self, server_name: str, tool_name: str, arguments: dict
-    ) -> str:
+    ) -> dict:
         """
-        Call a tool on the named MCP server and return its result as text.
+        Call a tool on the named MCP server and return the full MCP result dict.
 
         Opens a fresh MCP session (initialize → notifications/initialized →
-        tools/call). Returns the text from content[0]["text"] in the result.
+        tools/call). Returns the raw result dict from the server:
+            {"content": [{"type": "text", "text": "..."}], "data": {...}}
+
+        Callers extract content[0]["text"] for LLM injection, or inspect
+        data["status"] for structured status checks (e.g. reminder poller).
 
         Raises RuntimeError if the server returns an error.
         Raises requests.exceptions.ConnectionError if the server is unreachable.
@@ -179,16 +183,7 @@ class MCPClient:
         url = spec["url"]
         session_id = self._initialize(url)
         self._notify_initialized(url, session_id)
-        result = self._tools_call(url, session_id, tool_name, arguments)
-
-        # Extract text from MCP content array
-        content = result.get("content", [])
-        if content and isinstance(content, list):
-            first = content[0]
-            if isinstance(first, dict):
-                return first.get("text", str(first))
-        # Fallback: return structured data as text
-        return str(result.get("data", result))
+        return self._tools_call(url, session_id, tool_name, arguments)
 
     def all_tools_for_llm(self) -> list[dict]:
         """

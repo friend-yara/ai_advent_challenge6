@@ -24,15 +24,17 @@ WEATHER_TOOLS: list[dict] = [
         "name": "get_forecast",
         "title": "Weather forecast",
         "description": (
-            "Get weather forecast by city/place and number of days. "
-            "Returns daily temperature_min and temperature_max."
+            "Get weather forecast by city name and number of days. "
+            "Returns daily temperature_min and temperature_max in °C. "
+            "IMPORTANT: 'place' must always be in English "
+            "(e.g. 'London', not 'Лондон'; 'Moscow', not 'Москва')."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "place": {
                     "type": "string",
-                    "description": "City or place name",
+                    "description": "City or place name in English (e.g. 'London', 'Paris', 'Tokyo')",
                 },
                 "days": {
                     "type": "integer",

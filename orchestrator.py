@@ -139,7 +139,8 @@ class Orchestrator:
             if isinstance(item, dict) and item.get("type") == "function_call"
         ]
 
-        servers_used: list[str] = []
+        tools_used: list[str] = []         # tool names used (for tag)
+        tool_results_data: list[dict] = []  # structured results for CLI poller
 
         if tool_call_items and self.mcp:
             # ---------- Execute tool calls ----------
@@ -147,8 +148,21 @@ class Orchestrator:
             for tc_item in tool_call_items:
                 result_text, server_name = self._execute_tool_call(tc_item)
                 tool_results.append((tc_item, result_text))
-                if server_name and server_name not in servers_used:
-                    servers_used.append(server_name)
+                tc_tool_name = tc_item.get("name", "")
+                if tc_tool_name and tc_tool_name not in tools_used:
+                    tools_used.append(tc_tool_name)
+                # Parse arguments for CLI consumers (e.g. reminder poller)
+                raw_args = tc_item.get("arguments", "{}")
+                try:
+                    arguments = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except json.JSONDecodeError:
+                    arguments = {}
+                tool_results_data.append({
+                    "tool_name": tc_tool_name,
+                    "server": server_name,
+                    "arguments": arguments,
+                    "result_text": result_text,
+                })
 
             # ---------- LLM call 2 with tool results ----------
             data2, elapsed2 = self._call_with_tool_results(
@@ -178,9 +192,9 @@ class Orchestrator:
                 else:
                     text = self._retry_with_violations(text, post_violations, spec)
 
-        # Append server tag(s) if MCP tools were used (same line as answer)
-        if servers_used:
-            tag = " ".join(f"#{s}" for s in servers_used)
+        # Append tool tag(s) if MCP tools were used (tool name, not server name)
+        if tools_used:
+            tag = " ".join(f"#{t}" for t in tools_used)
             text = f"{text} {tag}"
 
         stm.messages.append({"role": "assistant", "text": text})
@@ -198,6 +212,7 @@ class Orchestrator:
             "out": out_tok,
             "cost": total_cost,
             "pre_violations": pre_violations,
+            "tool_results": tool_results_data,  # for CLI consumers (reminder poller etc.)
         }
         return text, metrics
 
@@ -326,8 +341,14 @@ class Orchestrator:
             )
 
         try:
-            result = self.mcp.call_tool(server_name, tool_name, arguments)
-            return result, server_name
+            result_dict = self.mcp.call_tool(server_name, tool_name, arguments)
+            # Extract text for LLM injection (function_call_output must be a string)
+            content = result_dict.get("content", [])
+            if content and isinstance(content, list):
+                result_text = content[0].get("text", str(result_dict))
+            else:
+                result_text = str(result_dict.get("data", result_dict))
+            return result_text, server_name
         except Exception as e:
             print(f"[WARN] Tool call '{tool_name}' failed: {e}", file=sys.stderr)
             return f"Tool call failed: {e}", None

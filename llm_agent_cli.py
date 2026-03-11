@@ -23,6 +23,8 @@ Demo flow (orchestrator + agents):
 import os
 import sys
 import argparse
+import threading
+import time
 from pathlib import Path
 
 from agent import Agent, LongTermMemory, load_pricing_models
@@ -178,6 +180,40 @@ Invariant checks:
 def print_metrics(m: dict):
     """Print turn metrics: token counts and cost only."""
     print(f" (in={m['in']}, out={m['out']}, cost={m['cost']})\n")
+
+
+def _start_reminder_poller(job_id: str, delay_seconds: int, mcp: MCPClient):
+    """
+    Start a daemon thread that polls reminder status and notifies the user
+    when it fires. Uses patch_stdout so prompt_toolkit renders it cleanly.
+    """
+    server_name = mcp.find_tool_server("reminder")
+    if server_name is None:
+        return  # reminder tool not available in MCP cache
+
+    def _poll():
+        deadline = time.monotonic() + delay_seconds + 30  # grace period
+        while time.monotonic() < deadline:
+            time.sleep(2)
+            try:
+                result_dict = mcp.call_tool(server_name, "reminder", {"job_id": job_id})
+                status = result_dict.get("data", {}).get("status")
+                if status == "completed":
+                    content = result_dict.get("content", [])
+                    msg_text = content[0].get("text", "") if content else str(result_dict)
+                    msg = f"\n🔔 {msg_text}\n"
+                    if patch_stdout is not None:
+                        with patch_stdout():
+                            print(msg, flush=True)
+                    else:
+                        print(msg, flush=True)
+                    return
+            except Exception:
+                pass  # transient errors — keep polling
+
+    t = threading.Thread(target=_poll, daemon=True,
+                         name=f"reminder-poller-{job_id}")
+    t.start()
 
 
 def main():
@@ -639,6 +675,17 @@ def main():
             else:
                 print(answer, end="")
                 print_metrics(metrics)
+
+            # Start reminder poller if a reminder tool was called
+            for tr in metrics.get("tool_results", []):
+                if tr.get("tool_name") == "reminder":
+                    # Extract job_id from result text (pattern: "job_id: <hex>")
+                    import re as _re
+                    m = _re.search(r"job_id[:\s]+([0-9a-f]{12})", tr.get("result_text", ""))
+                    if m:
+                        _jid = m.group(1)
+                        _delay = tr.get("arguments", {}).get("delay_seconds", 30)
+                        _start_reminder_poller(_jid, int(_delay), mcp)
 
             # Auto-save working state after each successful turn
             try:

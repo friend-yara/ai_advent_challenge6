@@ -1,7 +1,7 @@
-# Local MCP Server — Weather Forecast
+# Local MCP Server — Weather Forecast & Scheduler
 
 Minimal MCP server over HTTP (Streamable HTTP transport, spec 2024-11-05).  
-Implements one tool: **get_forecast** — weather forecast via Open-Meteo (free, no API key).
+Tools: **get_forecast** (weather via Open-Meteo) and **reminder** (delayed reminders via SQLite).
 
 ---
 
@@ -176,4 +176,64 @@ curl -s -X POST http://127.0.0.1:8000/mcp \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SID" \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_forecast","arguments":{"place":"London","days":3}}}'
+```
+
+---
+
+## Tool: reminder
+
+| Field | Value |
+|---|---|
+| name | `reminder` |
+| title | Reminder |
+| description | Create a delayed reminder and track its execution status |
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `text` | string | for create | Reminder text |
+| `delay_seconds` | integer | no (default 30) | Delay in seconds (1–86400) |
+| `job_id` | string | for status check | ID of an existing reminder |
+
+**Reminders are persisted in `mcp/reminders.db` (SQLite) and survive server restarts.**  
+A background loop marks reminders as `completed` when their `due_at` time has passed.
+
+### curl: create a reminder (30 seconds)
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "tools/call",
+    "params": {
+      "name": "reminder",
+      "arguments": {"text": "измерить давление", "delay_seconds": 30}
+    }
+  }'
+# Response includes job_id, status=scheduled, due_at
+```
+
+### curl: check reminder status by job_id
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "tools/call",
+    "params": {
+      "name": "reminder",
+      "arguments": {"job_id": "<your-job-id>"}
+    }
+  }'
+# Returns: status=scheduled (with seconds_remaining)
+#       or status=completed (with actual_delay_seconds and summary)
 ```
