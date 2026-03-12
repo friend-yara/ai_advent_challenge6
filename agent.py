@@ -200,18 +200,16 @@ class Invariants:
                         lines.append(f"  {k}: {v}")
             elif isinstance(value, list):
                 for item in value:
-                    lines.append(f"  - {item}")
+                    label = item.get("rule", item) if isinstance(item, dict) else item
+                    lines.append(f"  - {label}")
             else:
                 lines.append(f"  {value}")
             lines.append("")
         return "\n".join(lines).strip()
 
-    def to_banned_lines(self) -> str:
-        """
-        Return only the banned list as '- No ...' lines for InvariantChecker.
-        """
-        banned = self.data.get("banned", [])
-        return "\n".join(f"- {item}" for item in banned)
+    def banned_items(self) -> list[dict]:
+        """Return banned rules as list of {rule, patterns} dicts."""
+        return self.data.get("banned", [])
 
 
 class LongTermMemory:
@@ -275,9 +273,7 @@ class LongTermMemory:
                 self.invariants_obj = None
             else:
                 self.invariants = self.invariants_obj.to_text()
-                self.checker.load_from_text(
-                    self.invariants_obj.to_banned_lines()
-                )
+                self.checker.load_from_items(self.invariants_obj.banned_items())
 
     def reload(self):
         """Re-read LTM files from disk (clears cache first)."""
@@ -324,50 +320,21 @@ class InvariantChecker:
     Rules are parsed from INVARIANTS.yaml at load time. No extra API calls.
     """
 
-    # Mapping from known ban keywords to regex patterns
-    _KEYWORD_PATTERNS: dict[str, list[str]] = {
-        "openai sdk":    [r"import openai", r"from openai", r"openai\.Client",
-                          r"OpenAI\(", r"openai\.chat", r"openai\.completions"],
-        "openai":        [r"import openai", r"from openai\b"],
-        "langchain":     [r"import langchain", r"from langchain", r"langchain\."],
-        "sdk":           [r"import openai", r"openai\."],
-        "system-wide pip": [r"sudo pip", r"pip3?\s+install(?!\s+--user)(?!\s+-r\s)"],
-        "pip install":   [r"sudo pip", r"pip3?\s+install(?!\s+--user)(?!\s+-r\s)"],
-        "gui":           [r"\btkinter\b", r"\bPyQt\b", r"\bwxPython\b",
-                          r"\bpygame\b", r"\bpyautogui\b"],
-        "browser":       [r"\bselenium\b", r"\bplaywright\b", r"\bpuppeteer\b"],
-        "boto3":         [r"\bboto3\b"],
-        "firebase":      [r"\bfirebase\b"],
-        "supabase":      [r"\bsupabase\b"],
-        "aws":           [r"\baws_\w+\b", r"\bboto3\b"],
-        "database":      [r"\bsqlalchemy\b", r"\bpsycopg2\b", r"\bdjango\.db\b"],
-    }
-
     def __init__(self):
         """Initialize with empty rule set."""
         self.rules: list[InvariantRule] = []
         self.last_result: tuple[bool, list[str]] = (True, [])
 
-    def load_from_text(self, text: str):
-        """Parse InvariantRule list from banned lines text."""
+    def load_from_items(self, items: list[dict]):
+        """Load rules from list of {rule, patterns} dicts (from INVARIANTS.yaml)."""
         self.rules = []
-        for line in text.splitlines():
-            stripped = line.strip()
-            # Match lines like "- No ..." or "- no ..."
-            if not re.match(r"^-\s+[Nn]o\b", stripped):
-                continue
-            description = stripped.lstrip("- ").strip()
-            patterns = self._patterns_for(description)
-            if patterns:
+        for item in items:
+            if not isinstance(item, dict):
+                continue  # skip plain strings (old format)
+            description = item.get("rule", "")
+            patterns = item.get("patterns", [])
+            if description and patterns:
                 self.rules.append(InvariantRule(description, patterns))
-
-    def _patterns_for(self, description: str) -> list[str]:
-        """Return regex patterns for a rule description by keyword matching."""
-        desc_lower = description.lower()
-        for keyword, patterns in self._KEYWORD_PATTERNS.items():
-            if keyword in desc_lower:
-                return patterns
-        return []
 
     def check(self, text: str) -> tuple[bool, list[str]]:
         """
