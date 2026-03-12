@@ -31,6 +31,7 @@ from mcp.base import (
     run_server,
 )
 from mcp.mcp_scheduler import SCHEDULER_TOOLS, dispatch_scheduler_tool, init_scheduler
+from mcp.mcp_storage import STORAGE_TOOLS, dispatch_storage_tool
 from mcp.mcp_weather import WEATHER_TOOLS, dispatch_weather_tool
 
 # ---------------------------------------------------------------------------
@@ -40,11 +41,13 @@ from mcp.mcp_weather import WEATHER_TOOLS, dispatch_weather_tool
 ALL_TOOLS: list[dict] = [
     *WEATHER_TOOLS,
     *SCHEDULER_TOOLS,
+    *STORAGE_TOOLS,
 ]
 
 _DISPATCH: dict[str, object] = {
     **{t["name"]: dispatch_weather_tool   for t in WEATHER_TOOLS},
     **{t["name"]: dispatch_scheduler_tool for t in SCHEDULER_TOOLS},
+    **{t["name"]: dispatch_storage_tool   for t in STORAGE_TOOLS},
 }
 
 # ---------------------------------------------------------------------------
@@ -62,7 +65,9 @@ class RouterMCPHandler(MCPBaseHandler):
     INSTRUCTIONS   = (
         "Local MCP router. "
         "Available tools: weather forecast (get_forecast), "
-        "scheduler reminders (reminder)."
+        "forecast summary (summarize_forecast), "
+        "scheduler reminders (reminder), "
+        "file storage (save_to_file)."
     )
     TOOLS = ALL_TOOLS   # used by run_server() for startup display
 

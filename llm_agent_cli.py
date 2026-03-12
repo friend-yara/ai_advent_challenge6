@@ -182,10 +182,66 @@ def print_metrics(m: dict):
     print(f" (in={m['in']}, out={m['out']}, cost={m['cost']})\n")
 
 
+def _print_cli(msg: str) -> None:
+    """Print a message cleanly over the prompt_toolkit prompt if available."""
+    if patch_stdout is not None:
+        with patch_stdout():
+            print(msg, flush=True)
+    else:
+        print(msg, flush=True)
+
+
+def _execute_pipeline(pipeline: list[dict], job_id: str, mcp: MCPClient):
+    """Execute pipeline steps sequentially, print progress, chain outputs."""
+    prev_output: str = ""
+    last_idx = len(pipeline) - 1
+
+    for i, step in enumerate(pipeline):
+        tool_name = step.get("tool", "")
+        # Normalize: LLM sometimes prefixes names with "functions."
+        if tool_name.startswith("functions."):
+            tool_name = tool_name[len("functions."):]
+        args = step.get("args", {})
+
+        # Substitute {prev_output} in string arg values
+        resolved_args = {
+            k: (v.replace("{prev_output}", prev_output) if isinstance(v, str) else v)
+            for k, v in args.items()
+        }
+
+        # Progress message before calling
+        if tool_name == "get_forecast":
+            status_msg = f"получаю прогноз (job #{job_id})"
+        elif tool_name == "summarize_forecast":
+            status_msg = f"составляю сводку (job #{job_id})"
+        elif tool_name == "save_to_file":
+            fname = resolved_args.get("filename", "forecast.txt")
+            status_msg = f"{fname} (job #{job_id})"
+        else:
+            status_msg = f"(job #{job_id})"
+
+        suffix = " - пайплайн закончен!" if i == last_idx else ""
+        _print_cli(f"\n{tool_name}: {status_msg}{suffix}")
+
+        server_name = mcp.find_tool_server(tool_name)
+        if server_name is None:
+            _print_cli(f"[WARN] tool '{tool_name}' not found, skipping")
+            continue
+
+        try:
+            result = mcp.call_tool(server_name, tool_name, resolved_args)
+            content = result.get("content", [])
+            prev_output = content[0].get("text", "") if content else ""
+        except Exception as e:
+            _print_cli(f"[ERROR] {tool_name}: {e}")
+            prev_output = ""
+
+
 def _start_reminder_poller(job_id: str, delay_seconds: int, mcp: MCPClient):
     """
     Start a daemon thread that polls reminder status and notifies the user
-    when it fires. Uses patch_stdout so prompt_toolkit renders it cleanly.
+    when it fires. If the reminder has a pipeline, executes it sequentially.
+    Uses patch_stdout so prompt_toolkit renders it cleanly.
     """
     server_name = mcp.find_tool_server("reminder")
     if server_name is None:
@@ -197,16 +253,15 @@ def _start_reminder_poller(job_id: str, delay_seconds: int, mcp: MCPClient):
             time.sleep(2)
             try:
                 result_dict = mcp.call_tool(server_name, "reminder", {"job_id": job_id})
-                status = result_dict.get("data", {}).get("status")
-                if status == "completed":
-                    content = result_dict.get("content", [])
-                    msg_text = content[0].get("text", "") if content else str(result_dict)
-                    msg = f"\n🔔 {msg_text}\n"
-                    if patch_stdout is not None:
-                        with patch_stdout():
-                            print(msg, flush=True)
+                data = result_dict.get("data", {})
+                if data.get("status") == "completed":
+                    pipeline = data.get("pipeline")
+                    if pipeline:
+                        _execute_pipeline(pipeline, job_id, mcp)
                     else:
-                        print(msg, flush=True)
+                        content = result_dict.get("content", [])
+                        msg_text = content[0].get("text", "") if content else str(result_dict)
+                        _print_cli(f"\n🔔 {msg_text}\n")
                     return
             except Exception:
                 pass  # transient errors — keep polling
@@ -679,13 +734,20 @@ def main():
             # Start reminder poller if a reminder tool was called
             for tr in metrics.get("tool_results", []):
                 if tr.get("tool_name") == "reminder":
-                    # Extract job_id from result text (pattern: "job_id: <hex>")
-                    import re as _re
-                    m = _re.search(r"job_id[:\s]+([0-9a-f]{12})", tr.get("result_text", ""))
-                    if m:
-                        _jid = m.group(1)
-                        _delay = tr.get("arguments", {}).get("delay_seconds", 30)
-                        _start_reminder_poller(_jid, int(_delay), mcp)
+                    _jid = tr.get("data", {}).get("job_id")
+                    if _jid:
+                        _reminder_text = tr.get("data", {}).get("text", "")
+                        _print_cli(f"reminder: запланирована задача «{_reminder_text}» (job #{_jid})")
+                        args_d = tr.get("arguments", {})
+                        if args_d.get("delay_days"):
+                            _delay = int(float(args_d["delay_days"]) * 86400)
+                        elif args_d.get("delay_hours"):
+                            _delay = int(float(args_d["delay_hours"]) * 3600)
+                        elif args_d.get("delay_minutes"):
+                            _delay = int(float(args_d["delay_minutes"]) * 60)
+                        else:
+                            _delay = int(args_d.get("delay_seconds", 30))
+                        _start_reminder_poller(_jid, _delay, mcp)
 
             # Auto-save working state after each successful turn
             try:

@@ -44,7 +44,31 @@ WEATHER_TOOLS: list[dict] = [
             },
             "required": ["place"],
         },
-    }
+    },
+    {
+        "name": "summarize_forecast",
+        "title": "Summarize weather forecast",
+        "description": (
+            "Generate a short human-readable weather summary for a place. "
+            "IMPORTANT: 'place' must always be in English "
+            "(e.g. 'London', not 'Лондон'; 'Moscow', not 'Москва')."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "place": {
+                    "type": "string",
+                    "description": "City or place name in English",
+                },
+                "days": {
+                    "type": "integer",
+                    "description": "Number of forecast days",
+                    "default": 3,
+                },
+            },
+            "required": ["place"],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -63,6 +87,20 @@ def dispatch_weather_tool(tool_name: str, arguments: dict) -> dict:
         ValueError  if required arguments are missing or invalid
         RuntimeError on upstream API errors
     """
+    if tool_name == "summarize_forecast":
+        place = arguments.get("place", "").strip()
+        if not place:
+            raise ValueError("Missing required argument: 'place'")
+        days = arguments.get("days", 3)
+        try:
+            days = int(days)
+            if not (1 <= days <= 16):
+                raise ValueError("days must be between 1 and 16")
+        except (TypeError, ValueError) as e:
+            raise ValueError(str(e)) from e
+        data = _get_forecast(place, days)
+        return _summarize_forecast(data)
+
     if tool_name != "get_forecast":
         raise KeyError(f"Unknown weather tool: {tool_name!r}")
 
@@ -83,6 +121,7 @@ def dispatch_weather_tool(tool_name: str, arguments: dict) -> dict:
     data = _get_forecast(place, days)
 
     lines = [
+        f"get_forecast: Fetching weather forecast for {place}...",
         f"Weather forecast for {data['place']}"
         + (f", {data['country']}" if data["country"] else ""),
         f"Coordinates: {data['latitude']}, {data['longitude']}",
@@ -104,6 +143,39 @@ def dispatch_weather_tool(tool_name: str, arguments: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Internal weather logic (Open-Meteo, no API key required)
 # ---------------------------------------------------------------------------
+
+def _summarize_forecast(data: dict) -> dict:
+    """Build a short human-readable summary from get_forecast data."""
+    place   = data.get("place", "Unknown")
+    country = data.get("country", "")
+    forecast = data.get("forecast", [])
+    if not forecast:
+        raise ValueError("forecast_data contains no forecast entries")
+
+    t_min = min(d["temperature_min"] for d in forecast)
+    t_max = max(d["temperature_max"] for d in forecast)
+    date_from = forecast[0]["date"]
+    date_to   = forecast[-1]["date"]
+
+    location = f"{place}, {country}" if country else place
+    text = (
+        f"summarize_forecast: Generating weather summary...\n"
+        f"{location}: {date_from} — {date_to}\n"
+        f"Temperature range: {t_min:.0f}–{t_max:.0f}°C"
+    )
+    return {
+        "content": [{"type": "text", "text": text}],
+        "data": {
+            "place": place,
+            "country": country,
+            "date_from": date_from,
+            "date_to": date_to,
+            "temperature_min": t_min,
+            "temperature_max": t_max,
+            "summary": text,
+        },
+    }
+
 
 def _get_forecast(place: str, days: int) -> dict:
     """

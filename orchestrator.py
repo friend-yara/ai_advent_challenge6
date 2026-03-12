@@ -142,12 +142,15 @@ class Orchestrator:
         tools_used: list[str] = []         # tool names used (for tag)
         tool_results_data: list[dict] = []  # structured results for CLI poller
 
-        if tool_call_items and self.mcp:
-            # ---------- Execute tool calls ----------
-            tool_results: list[tuple[dict, str]] = []
+        _MAX_TOOL_ROUNDS = 8
+        all_tool_results: list[tuple[dict, str]] = []
+
+        _round = 0
+        while tool_call_items and self.mcp and _round < _MAX_TOOL_ROUNDS:
+            _round += 1
             for tc_item in tool_call_items:
-                result_text, server_name = self._execute_tool_call(tc_item)
-                tool_results.append((tc_item, result_text))
+                result_text, server_name, result_data = self._execute_tool_call(tc_item)
+                all_tool_results.append((tc_item, result_text))
                 tc_tool_name = tc_item.get("name", "")
                 if tc_tool_name and tc_tool_name not in tools_used:
                     tools_used.append(tc_tool_name)
@@ -162,20 +165,26 @@ class Orchestrator:
                     "server": server_name,
                     "arguments": arguments,
                     "result_text": result_text,
+                    "data": result_data,
                 })
 
-            # ---------- LLM call 2 with tool results ----------
-            data2, elapsed2 = self._call_with_tool_results(
-                spec, user_text, tool_results, tools_for_llm, ag
+            # ---------- LLM call with accumulated tool results ----------
+            data_next, elapsed_next = self._call_with_tool_results(
+                spec, user_text, all_tool_results, tools_for_llm, ag
             )
-            elapsed += elapsed2
+            elapsed += elapsed_next
 
-            if isinstance(data2, dict) and data2.get("error") is not None:
-                err = data2.get("error") or {}
+            if isinstance(data_next, dict) and data_next.get("error") is not None:
+                err = data_next.get("error") or {}
                 msg = err.get("message") if isinstance(err, dict) else str(err)
                 raise RuntimeError(msg or "API error (tool result call)")
 
-            data = data2
+            data = data_next
+            output_items = data.get("output", []) if isinstance(data, dict) else []
+            tool_call_items = [
+                item for item in output_items
+                if isinstance(item, dict) and item.get("type") == "function_call"
+            ]
 
         # Extract final text
         if ag.print_json:
@@ -319,12 +328,12 @@ class Orchestrator:
             for tool in raw
         ]
 
-    def _execute_tool_call(self, tc_item: dict) -> tuple[str, str | None]:
+    def _execute_tool_call(self, tc_item: dict) -> tuple[str, str | None, dict]:
         """
         Execute a single function_call item from the LLM output via MCPClient.
 
-        Returns (result_text, server_name).
-        On any error returns (error_description, None).
+        Returns (result_text, server_name, result_data).
+        On any error returns (error_description, None, {}).
         """
         tool_name = tc_item.get("name", "")
         raw_args = tc_item.get("arguments", "{}")
@@ -338,6 +347,7 @@ class Orchestrator:
             return (
                 f"Tool '{tool_name}' is not available on any configured MCP server.",
                 None,
+                {},
             )
 
         try:
@@ -348,10 +358,11 @@ class Orchestrator:
                 result_text = content[0].get("text", str(result_dict))
             else:
                 result_text = str(result_dict.get("data", result_dict))
-            return result_text, server_name
+            result_data = result_dict.get("data", {})
+            return result_text, server_name, result_data
         except Exception as e:
             print(f"[WARN] Tool call '{tool_name}' failed: {e}", file=sys.stderr)
-            return f"Tool call failed: {e}", None
+            return f"Tool call failed: {e}", None, {}
 
     def _call_with_tool_results(
         self,
