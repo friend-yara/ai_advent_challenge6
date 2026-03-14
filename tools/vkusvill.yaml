@@ -1,3 +1,4 @@
 name: vkusvill
 url: https://mcp001.vkusvill.ru/mcp
 description: ВкусВилл — поиск товаров и формирование ссылки на корзину
+auto_load: false

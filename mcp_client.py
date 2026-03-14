@@ -82,6 +82,11 @@ class MCPClient:
                 continue
             self._servers[spec["name"]] = spec
 
+            # Skip pre-fetch if server is marked auto_load: false
+            if not spec.get("auto_load", True):
+                self._tools_cache[spec["name"]] = []
+                continue
+
             # Pre-fetch tools (skip unreachable servers silently)
             try:
                 tools = self._fetch_tools(spec["url"])
@@ -117,6 +122,7 @@ class MCPClient:
             "name": str(data["name"]),
             "url": str(data["url"]),
             "description": str(data.get("description", "")),
+            "auto_load": bool(data.get("auto_load", True)),
         }
 
     # ---------------- Public API ----------------
