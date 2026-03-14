@@ -1,3 +1,3 @@
 name: weather
-url: http://127.0.0.1:8000/mcp
-description: Локальный MCP-сервер — прогноз погоды (get_forecast)
+url: http://127.0.0.1:8001/mcp
+description: Локальный MCP-сервер — прогноз погоды (get_forecast, summarize_forecast)

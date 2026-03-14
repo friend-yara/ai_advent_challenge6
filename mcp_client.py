@@ -42,7 +42,7 @@ except ImportError as e:
 # MCP protocol version we advertise
 _PROTOCOL_VERSION = "2024-11-05"
 _CLIENT_INFO = {"name": "llm-agent-cli", "version": "0.1"}
-_TIMEOUT = 15   # seconds per HTTP request
+_TIMEOUT = 30   # seconds per HTTP request
 
 
 class MCPClient:

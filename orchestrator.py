@@ -309,6 +309,82 @@ class Orchestrator:
         spec = self.registry.for_state(self.agent.tc.state)
         return spec.name if spec else "(none)"
 
+    # ---------------- Pipeline / routing ----------------
+
+    def _route_tool(self, tool_name: str) -> str | None:
+        """Return the MCP server name that provides the named tool, or None."""
+        return self.mcp.find_tool_server(tool_name) if self.mcp else None
+
+    def _build_capability_registry(self) -> dict:
+        """Build {tool_name: server_name} from cached MCP tools."""
+        if not self.mcp:
+            return {}
+        registry: dict[str, str] = {}
+        for server_name, tools in self.mcp._tools_cache.items():
+            for t in tools:
+                registry[t["name"]] = server_name
+        return registry
+
+    def execute_pipeline(
+        self,
+        pipeline: list[dict],
+        job_id: str,
+        progress_cb=None,
+    ) -> None:
+        """
+        Execute pipeline steps sequentially, chaining prev_output between steps.
+
+        progress_cb — optional callable(message: str) for CLI output.
+        Strips 'functions.' prefix from tool names if present (OpenAI quirk).
+        """
+        prev_output: str = ""
+        last_idx = len(pipeline) - 1
+
+        def _emit(msg: str) -> None:
+            if progress_cb:
+                progress_cb(msg)
+
+        for i, step in enumerate(pipeline):
+            tool_name = step.get("tool", "")
+            # Normalize: LLM sometimes prefixes names with "functions."
+            if tool_name.startswith("functions."):
+                tool_name = tool_name[len("functions."):]
+            args = step.get("args", {})
+
+            # Substitute {prev_output} in string arg values
+            resolved_args = {
+                k: (v.replace("{prev_output}", prev_output) if isinstance(v, str) else v)
+                for k, v in args.items()
+            }
+
+            server_name = self._route_tool(tool_name)
+            if server_name is None:
+                _emit(f"\n[WARN] {tool_name}: not found, skipping")
+                continue
+
+            # Progress message before calling
+            if tool_name == "get_forecast":
+                status_msg = f"получаю прогноз (job #{job_id})"
+            elif tool_name == "summarize_forecast":
+                status_msg = f"составляю сводку (job #{job_id})"
+            elif tool_name == "save_to_file":
+                fname = resolved_args.get("filename", "forecast.txt")
+                status_msg = f"{fname} (job #{job_id})"
+            else:
+                status_msg = f"(job #{job_id})"
+
+            suffix = " - пайплайн закончен!" if i == last_idx else ""
+            _emit(f"\n{server_name}:{tool_name}: {status_msg}{suffix}")
+
+            try:
+                result = self.mcp.call_tool(server_name, tool_name, resolved_args)
+                content = result.get("content", [])
+                prev_output = content[0].get("text", "") if content else ""
+            except Exception as e:
+                print(f"[WARN] Pipeline step '{tool_name}' failed: {e}", file=sys.stderr)
+                _emit(f"[ERROR] {tool_name}: {e} — pipeline прерван")
+                break
+
     # ---------------- MCP tool calling ----------------
 
     def _build_tools_list(self, spec: AgentSpec) -> list[dict]:

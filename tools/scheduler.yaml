@@ -1,0 +1,3 @@
+name: scheduler
+url: http://127.0.0.1:8002/mcp
+description: Планировщик задач — reminder с задержкой и pipeline

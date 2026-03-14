@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-mcp/server.py — MCP router: single endpoint, multiple domain modules.
+mcp/server.py — Multi-server MCP launcher.
 
-Serves all tools via one /mcp endpoint by delegating to domain modules.
+Starts three domain MCP servers on separate ports:
+  WeatherMCPHandler   → 127.0.0.1:8001  (get_forecast, summarize_forecast)
+  SchedulerMCPHandler → 127.0.0.1:8002  (reminder)
+  StorageMCPHandler   → 127.0.0.1:8003  (save_to_file)
 
 Usage:
-    python mcp/server.py                   # 127.0.0.1:8000
-    python mcp/server.py --port 9000
-    python mcp/server.py --host 0.0.0.0 --port 8080
+    python mcp/server.py
 
-MCP endpoint: http://127.0.0.1:8000/mcp
-
-Extending — add a new domain module (e.g. mcp/mcp_notes.py):
-    1. Create mcp/mcp_notes.py with NOTES_TOOLS and dispatch_notes_tool()
-    2. Import them below
-    3. Add to ALL_TOOLS and _DISPATCH (2 lines)
+Weather and scheduler run in daemon threads; storage runs in the main thread.
+Press Ctrl+C to stop all servers.
 """
 
 import os
 import sys
+import threading
+from http.server import HTTPServer
 
 # Ensure project root is on sys.path when run directly as a script
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,61 +27,79 @@ from mcp.base import (
     ERR_METHOD_NOT_FOUND,
     ERR_SERVER_ERROR,
     MCPBaseHandler,
-    run_server,
 )
 from mcp.mcp_scheduler import SCHEDULER_TOOLS, dispatch_scheduler_tool, init_scheduler
 from mcp.mcp_storage import STORAGE_TOOLS, dispatch_storage_tool
 from mcp.mcp_weather import WEATHER_TOOLS, dispatch_weather_tool
 
 # ---------------------------------------------------------------------------
-# Tool registry — add new domain modules here
+# Domain handlers
 # ---------------------------------------------------------------------------
 
-ALL_TOOLS: list[dict] = [
-    *WEATHER_TOOLS,
-    *SCHEDULER_TOOLS,
-    *STORAGE_TOOLS,
-]
 
-_DISPATCH: dict[str, object] = {
-    **{t["name"]: dispatch_weather_tool   for t in WEATHER_TOOLS},
-    **{t["name"]: dispatch_scheduler_tool for t in SCHEDULER_TOOLS},
-    **{t["name"]: dispatch_storage_tool   for t in STORAGE_TOOLS},
-}
+class WeatherMCPHandler(MCPBaseHandler):
+    """MCP handler for weather forecast tools."""
 
-# ---------------------------------------------------------------------------
-# Router handler
-# ---------------------------------------------------------------------------
-
-class RouterMCPHandler(MCPBaseHandler):
-    """
-    Single MCP handler that routes tools/call to the appropriate domain module.
-    Protocol mechanics (sessions, initialize, tools/list) are handled by MCPBaseHandler.
-    """
-
-    SERVER_NAME    = "local-mcp-router"
+    SERVER_NAME    = "local-mcp-weather"
     SERVER_VERSION = "0.1"
-    INSTRUCTIONS   = (
-        "Local MCP router. "
-        "Available tools: weather forecast (get_forecast), "
-        "forecast summary (summarize_forecast), "
-        "scheduler reminders (reminder), "
-        "file storage (save_to_file)."
-    )
-    TOOLS = ALL_TOOLS   # used by run_server() for startup display
+    INSTRUCTIONS   = "Weather forecast server. Tools: get_forecast, summarize_forecast."
+    TOOLS          = WEATHER_TOOLS
 
     def _get_tools(self) -> list[dict]:
-        return ALL_TOOLS
+        return WEATHER_TOOLS
 
     def _dispatch_tool(self, req_id, tool_name: str,
                        arguments: dict, session_id: str):
-        dispatch_fn = _DISPATCH.get(tool_name)
-        if dispatch_fn is None:
-            self._send_rpc_error(req_id, ERR_METHOD_NOT_FOUND,
-                                 f"Unknown tool: {tool_name!r}")
-            return
         try:
-            result = dispatch_fn(tool_name, arguments)
+            result = dispatch_weather_tool(tool_name, arguments)
+            self._send_rpc_ok(req_id, result)
+        except KeyError as e:
+            self._send_rpc_error(req_id, ERR_METHOD_NOT_FOUND, str(e))
+        except ValueError as e:
+            self._send_rpc_error(req_id, ERR_INVALID_PARAMS, str(e))
+        except Exception as e:
+            self._send_rpc_error(req_id, ERR_SERVER_ERROR, f"Tool error: {e}")
+
+
+class SchedulerMCPHandler(MCPBaseHandler):
+    """MCP handler for scheduler/reminder tools."""
+
+    SERVER_NAME    = "local-mcp-scheduler"
+    SERVER_VERSION = "0.1"
+    INSTRUCTIONS   = "Scheduler server. Tools: reminder."
+    TOOLS          = SCHEDULER_TOOLS
+
+    def _get_tools(self) -> list[dict]:
+        return SCHEDULER_TOOLS
+
+    def _dispatch_tool(self, req_id, tool_name: str,
+                       arguments: dict, session_id: str):
+        try:
+            result = dispatch_scheduler_tool(tool_name, arguments)
+            self._send_rpc_ok(req_id, result)
+        except KeyError as e:
+            self._send_rpc_error(req_id, ERR_METHOD_NOT_FOUND, str(e))
+        except ValueError as e:
+            self._send_rpc_error(req_id, ERR_INVALID_PARAMS, str(e))
+        except Exception as e:
+            self._send_rpc_error(req_id, ERR_SERVER_ERROR, f"Tool error: {e}")
+
+
+class StorageMCPHandler(MCPBaseHandler):
+    """MCP handler for file storage tools."""
+
+    SERVER_NAME    = "local-mcp-storage"
+    SERVER_VERSION = "0.1"
+    INSTRUCTIONS   = "File storage server. Tools: save_to_file."
+    TOOLS          = STORAGE_TOOLS
+
+    def _get_tools(self) -> list[dict]:
+        return STORAGE_TOOLS
+
+    def _dispatch_tool(self, req_id, tool_name: str,
+                       arguments: dict, session_id: str):
+        try:
+            result = dispatch_storage_tool(tool_name, arguments)
             self._send_rpc_ok(req_id, result)
         except KeyError as e:
             self._send_rpc_error(req_id, ERR_METHOD_NOT_FOUND, str(e))
@@ -93,9 +110,46 @@ class RouterMCPHandler(MCPBaseHandler):
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Launcher
 # ---------------------------------------------------------------------------
+
+_HOST = "127.0.0.1"
+
+_SERVERS = [
+    (WeatherMCPHandler,   8001),
+    (SchedulerMCPHandler, 8002),
+    (StorageMCPHandler,   8003),
+]
+
+
+def _start_server(handler_class: type, port: int) -> None:
+    """Start an HTTPServer in the current thread (blocking)."""
+    server = HTTPServer((_HOST, port), handler_class)
+    server.serve_forever()
+
 
 if __name__ == "__main__":
     init_scheduler()
-    run_server(RouterMCPHandler)
+
+    print("Starting MCP domain servers:")
+    for handler_class, port in _SERVERS:
+        url = f"http://{_HOST}:{port}/mcp"
+        tool_names = ", ".join(t["name"] for t in handler_class.TOOLS)
+        print(f"  {handler_class.SERVER_NAME}: {url}  [{tool_names}]")
+
+    # Start weather and scheduler as daemon threads
+    for handler_class, port in _SERVERS[:-1]:
+        t = threading.Thread(
+            target=_start_server,
+            args=(handler_class, port),
+            daemon=True,
+            name=f"{handler_class.SERVER_NAME}-thread",
+        )
+        t.start()
+
+    # Run storage in main thread (blocking — keeps the process alive)
+    print("Press Ctrl+C to stop.")
+    try:
+        _start_server(StorageMCPHandler, 8003)
+    except KeyboardInterrupt:
+        print("\nStopped.")
