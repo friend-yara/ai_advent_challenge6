@@ -4,3 +4,4 @@ __pycache__/
 mcp/reminders.db
 *.db-shm
 *.db-wal
+rag/index/

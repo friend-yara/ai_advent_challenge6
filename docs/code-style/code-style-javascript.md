@@ -1,0 +1,42 @@
+---
+title: "JavaScript Code Style"
+ShortTitle: "JavaScript"
+layout: "single"
+description: "Trimble's code style guidelines for JavaScript"
+url: "/code-style/javascript/"
+image: "/img/icons/code-style/javascript.svg"
+iconBGColor: "#F7DF1E"
+iconBGInvert: "true"
+code: true
+group: "code-style"
+---
+
+## Reference Code Standard
+
+- [Google's JavaScript style guide on GitHub](https://google.github.io/styleguide/jsguide.html)
+
+## Exceptions to the Standard
+
+The one exception is that preexisting libraries included in your applications should not be changed to fit the standard. Hopefully you’re extending a library and able to craft the extension in a standardized format.
+
+## Implementing the Standard
+
+Some IDE’s provide linting support built into their package system. For command-line you’ll need to install the package with administrative/root privilege
+
+```sh
+npm install eslint --save-dev
+# or
+yarn add eslint --dev
+```
+
+Once eslint is installed, you can use it by specifying `eslint:recommended` in the extends section of your [ESLint configuration](http://eslint.org/docs/user-guide/configuring).
+
+```json
+{
+  "root": true,
+  "extends": ["eslint:recommended"],
+  "rules": {
+    // Additional, per-project rules...
+  }
+}
+```

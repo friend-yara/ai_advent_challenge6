@@ -231,6 +231,38 @@ def _start_reminder_poller(job_id: str, delay_seconds: int, orch):
     t.start()
 
 
+def _run_indexing(chunker: str) -> None:
+    """Build and persist the RAG index for the given chunker strategy."""
+    from pathlib import Path as _Path
+    try:
+        from rag.indexer import build_index
+        from rag.retriever import _DEFAULT_INDEX_DIR, _cache
+    except ImportError as e:
+        print(f"[ERROR] RAG deps missing: {e}. Run: pip install faiss-cpu numpy")
+        return
+
+    corpus_path = _Path(__file__).parent / "docs"
+    if not corpus_path.exists():
+        print(f"[ERROR] docs/ directory not found: {corpus_path}", file=sys.stderr)
+        return
+
+    print(f"Индексирую корпус (стратегия: {chunker})...")
+    try:
+        metrics = build_index(corpus_path, chunker, _DEFAULT_INDEX_DIR)
+        # Invalidate in-memory cache so next search reloads from disk
+        _cache.clear()
+        print(f"  Чанков: {metrics['count']}")
+        print(f"  Средний размер: {metrics['avg_chars']:.0f} симв. | "
+              f"Мин: {metrics['min_chars']} | Макс: {metrics['max_chars']} | "
+              f"σ: {metrics['std_chars']:.0f}")
+        print(f"  Источников: {metrics['unique_sources']}")
+        print(f"  Время эмбеддинга: {metrics['embed_seconds']:.1f}s")
+        print(f"  Индекс сохранён: rag/index/index_{chunker}.faiss")
+        print(f"  Активная стратегия: {chunker}")
+    except Exception as e:
+        print(f"[ERROR] Индексирование не удалось: {e}")
+
+
 def main():
     """Run REPL."""
     args = resolve_profile_paths(build_parser().parse_args())
@@ -657,6 +689,14 @@ def main():
                     print("  /tool list              — список MCP-серверов")
                     print("  /tool list <сервер>     — инструменты сервера")
                 continue
+            if text.startswith("/index"):
+                parts = text.split()
+                _chunker = parts[1] if len(parts) > 1 else "fixed"
+                if _chunker not in ("fixed", "structured"):
+                    print("Использование: /index [fixed|structured]")
+                else:
+                    _run_indexing(_chunker)
+                continue
             print("Unknown command")
             continue
 
@@ -715,6 +755,13 @@ def main():
                     _print_cli(f"weather:get_forecast: {tr.get('result_text', '').strip()[:120]}")
                 elif _tname == "save_to_file":
                     _print_cli(f"storage:save_to_file: {tr.get('result_text', '').strip()[:120]}")
+                elif _tname == "document_search":
+                    _results = tr.get("data", {}).get("results", [])
+                    _query = tr.get("arguments", {}).get("query", "")
+                    _print_cli(
+                        f"rag:document_search: query={_query!r} "
+                        f"→ {len(_results)} chunk(s) found"
+                    )
 
             # Auto-save working state after each successful turn
             try:

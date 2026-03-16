@@ -34,6 +34,43 @@ import sys
 from agents import AgentRegistry, AgentSpec
 from context_builder import ContextBuilder
 
+# ---------------- RAG tool definition ----------------
+
+_DOCUMENT_SEARCH_TOOL = {
+    "type": "function",
+    "name": "document_search",
+    "description": (
+        "Search the local document corpus for chunks relevant to a query. "
+        "Use this to retrieve context from indexed project documents."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The search query to find relevant document chunks.",
+            },
+            "top_k": {
+                "type": "integer",
+                "description": "Number of top results to return (default 5).",
+                "default": 5,
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+
+def _rag_available() -> bool:
+    """Return True if the RAG index exists and rag package is importable."""
+    try:
+        from pathlib import Path
+        from rag.retriever import _DEFAULT_INDEX_DIR
+        config = _DEFAULT_INDEX_DIR / "config.json"
+        return config.exists()
+    except Exception:
+        return False
+
 
 class Orchestrator:
     """
@@ -146,7 +183,7 @@ class Orchestrator:
         all_tool_results: list[tuple[dict, str]] = []
 
         _round = 0
-        while tool_call_items and self.mcp and _round < _MAX_TOOL_ROUNDS:
+        while tool_call_items and _round < _MAX_TOOL_ROUNDS:
             _round += 1
             for tc_item in tool_call_items:
                 result_text, server_name, result_data = self._execute_tool_call(tc_item)
@@ -389,25 +426,30 @@ class Orchestrator:
 
     def _build_tools_list(self, spec: AgentSpec) -> list[dict]:
         """
-        Return OpenAI function definitions for all available MCP tools.
+        Return OpenAI function definitions for all available MCP tools plus
+        the local document_search tool if the RAG index exists.
         Only provided to the planner agent; returns [] for all others.
         Internal '_mcp_server' keys are stripped before sending to the API.
         """
-        if self.mcp is None or spec.name != "planner":
+        if spec.name != "planner":
             return []
-        raw = self.mcp.all_tools_for_llm()
-        if not raw:
-            return []
-        # Strip internal routing key before sending to OpenAI
-        return [
-            {k: v for k, v in tool.items() if not k.startswith("_")}
-            for tool in raw
-        ]
+        tools: list[dict] = []
+        if self.mcp is not None:
+            raw = self.mcp.all_tools_for_llm()
+            if raw:
+                tools.extend(
+                    {k: v for k, v in tool.items() if not k.startswith("_")}
+                    for tool in raw
+                )
+        if _rag_available():
+            tools.append(_DOCUMENT_SEARCH_TOOL)
+        return tools
 
     def _execute_tool_call(self, tc_item: dict) -> tuple[str, str | None, dict]:
         """
-        Execute a single function_call item from the LLM output via MCPClient.
+        Execute a single function_call item from the LLM output.
 
+        Handles document_search locally; delegates everything else to MCPClient.
         Returns (result_text, server_name, result_data).
         On any error returns (error_description, None, {}).
         """
@@ -417,6 +459,17 @@ class Orchestrator:
             arguments = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
         except json.JSONDecodeError:
             arguments = {}
+
+        # Handle local RAG document search
+        if tool_name == "document_search":
+            return self._execute_document_search(arguments)
+
+        if self.mcp is None:
+            return (
+                f"Tool '{tool_name}' is not available: MCP not configured.",
+                None,
+                {},
+            )
 
         server_name = self.mcp.find_tool_server(tool_name)
         if server_name is None:
@@ -439,6 +492,32 @@ class Orchestrator:
         except Exception as e:
             print(f"[WARN] Tool call '{tool_name}' failed: {e}", file=sys.stderr)
             return f"Tool call failed: {e}", None, {}
+
+    def _execute_document_search(self, arguments: dict) -> tuple[str, str, dict]:
+        """
+        Execute a local RAG document_search tool call.
+
+        Returns (result_text, server_name, result_data).
+        """
+        query = arguments.get("query", "")
+        top_k = int(arguments.get("top_k", 5))
+        try:
+            from rag.retriever import search
+            results = search(query, top_k=top_k)
+            if not results:
+                result_text = "No relevant documents found."
+                return result_text, "rag", {"results": []}
+            lines = []
+            for i, r in enumerate(results, 1):
+                section = f" [{r['section']}]" if r["section"] else ""
+                lines.append(
+                    f"[{i}] {r['source']}{section} (score={r['score']:.3f})\n{r['text']}"
+                )
+            result_text = "\n\n".join(lines)
+            return result_text, "rag", {"results": results}
+        except Exception as e:
+            print(f"[WARN] document_search failed: {e}", file=sys.stderr)
+            return f"document_search failed: {e}", "rag", {}
 
     def _call_with_tool_results(
         self,
