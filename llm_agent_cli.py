@@ -31,7 +31,7 @@ from agent import Agent, LongTermMemory, load_pricing_models
 from agents import AgentRegistry
 from context_builder import ContextBuilder
 from mcp_client import MCPClient
-from orchestrator import Orchestrator
+from orchestrator import Orchestrator, rag_available
 
 # Optional multiline input (prompt_toolkit)
 try:
@@ -94,6 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
     # MCP tools directory
     p.add_argument("--tools-dir", default="tools",
                    help="Directory containing MCP server spec *.yaml files")
+
+    p.add_argument("--batch-file", default=None,
+                   help="Read REPL input from file instead of terminal")
 
     return p
 
@@ -158,6 +161,8 @@ Commands:
   /whoami                  Short LLM-generated summary of current profile
   /tool list               List all configured MCP servers
   /tool list <server>      Connect to MCP server and show available tools
+  /rag                     Show RAG status (on/off + index)
+  /rag on|off              Enable or disable RAG retrieval
 
 Prompt format: [STATE:agent] >
   Example: [PLAN:planner] > or [EXEC:coder] >
@@ -311,10 +316,12 @@ def main():
     mcp.load()
 
     orchestrator = Orchestrator(agent, registry, ContextBuilder(), pricing, mcp=mcp)
+    orchestrator.rag_enabled = rag_available()
 
     print(f"Agents loaded: {registry.summary()}")
     print(f"MCP servers:   {mcp.summary()}")
     print(f"MCP tools:     {mcp.tools_summary()}")
+    print(f"RAG:           {'включён' if orchestrator.rag_enabled else 'выключен (нет индекса)'}")
 
     # Auto-load working state on startup (if file exists)
     state_was_loaded = False
@@ -373,10 +380,21 @@ def main():
     if PromptSession is not None:
         session = PromptSession(mouse_support=False)
 
+    _batch_iter = None
+    if args.batch_file:
+        _batch_fh = open(args.batch_file, encoding="utf-8")
+        _batch_iter = iter(_batch_fh)
+
     while True:
         try:
             prompt_str = state_prompt(agent.tc, orchestrator)
-            if session is not None:
+            if _batch_iter is not None:
+                try:
+                    text = next(_batch_iter).strip()
+                    print(f"{prompt_str}{text}")
+                except StopIteration:
+                    break
+            elif session is not None:
                 with patch_stdout():
                     text = session.prompt(
                         prompt_str,
@@ -581,6 +599,9 @@ def main():
                 print(f"[orch]    agents={registry.summary()}, "
                       f"active={orchestrator.current_agent_name()}")
                 print(f"[mcp]     {mcp.summary()}")
+                rag_status = "on" if orchestrator.rag_enabled else "off"
+                rag_idx = "index=ok" if rag_available() else "index=missing"
+                print(f"[rag]     {rag_status}, {rag_idx}")
                 continue
             if text == "/checkpoint":
                 agent.checkpoint()
@@ -697,6 +718,25 @@ def main():
                 else:
                     _run_indexing(_chunker)
                 continue
+            if text.startswith("/rag"):
+                parts = text.split(maxsplit=1)
+                sub = parts[1].strip().lower() if len(parts) > 1 else ""
+                if sub == "on":
+                    if not rag_available():
+                        print("ERROR: RAG-индекс не найден. Запустите /index.")
+                    else:
+                        orchestrator.rag_enabled = True
+                        print("OK: RAG включён")
+                elif sub == "off":
+                    orchestrator.rag_enabled = False
+                    print("OK: RAG выключен")
+                elif sub == "":
+                    status = "включён" if orchestrator.rag_enabled else "выключен"
+                    idx_str = "индекс найден" if rag_available() else "индекс отсутствует"
+                    print(f"RAG: {status} ({idx_str})")
+                else:
+                    print("Использование: /rag | /rag on | /rag off")
+                continue
             print("Unknown command")
             continue
 
@@ -758,10 +798,17 @@ def main():
                 elif _tname == "document_search":
                     _results = tr.get("data", {}).get("results", [])
                     _query = tr.get("arguments", {}).get("query", "")
-                    _print_cli(
-                        f"rag:document_search: query={_query!r} "
-                        f"→ {len(_results)} chunk(s) found"
-                    )
+                    _print_cli(f"[RAG] query: {_query!r}")
+                    _print_cli(f"[RAG] Retrieved {len(_results)} chunk(s):")
+                    for _ci, _r in enumerate(_results, 1):
+                        _section = f" [{_r['section']}]" if _r.get("section") else ""
+                        _score = _r.get("score", 0.0)
+                        _text_preview = _r.get("text", "")[:80].replace("\n", " ")
+                        _print_cli(
+                            f"  [{_ci}] {_r.get('source', '?')}{_section}"
+                            f"  score={_score:.3f}"
+                        )
+                        _print_cli(f"      {_text_preview}")
 
             # Auto-save working state after each successful turn
             try:

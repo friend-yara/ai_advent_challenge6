@@ -61,7 +61,7 @@ _DOCUMENT_SEARCH_TOOL = {
 }
 
 
-def _rag_available() -> bool:
+def rag_available() -> bool:
     """Return True if the RAG index exists and rag package is importable."""
     try:
         from pathlib import Path
@@ -97,6 +97,8 @@ class Orchestrator:
         self.mcp = mcp
         # Pinned agent for the next turn only (set via /agent <name>)
         self._pinned_agent: str | None = None
+        # RAG toggle — set to True at REPL startup if index exists
+        self.rag_enabled: bool = False
 
     # ---------------- Public API ----------------
 
@@ -426,23 +428,26 @@ class Orchestrator:
 
     def _build_tools_list(self, spec: AgentSpec) -> list[dict]:
         """
-        Return OpenAI function definitions for all available MCP tools plus
-        the local document_search tool if the RAG index exists.
-        Only provided to the planner agent; returns [] for all others.
+        Return OpenAI function definitions for tools available to this agent.
+        MCP tools: planner only (unchanged).
+        document_search (RAG): all agents, when self.rag_enabled is True.
         Internal '_mcp_server' keys are stripped before sending to the API.
         """
-        if spec.name != "planner":
-            return []
         tools: list[dict] = []
-        if self.mcp is not None:
+
+        # MCP tools: planner only
+        if spec.name == "planner" and self.mcp is not None:
             raw = self.mcp.all_tools_for_llm()
             if raw:
                 tools.extend(
                     {k: v for k, v in tool.items() if not k.startswith("_")}
                     for tool in raw
                 )
-        if _rag_available():
+
+        # RAG tool: all agents when enabled
+        if self.rag_enabled:
             tools.append(_DOCUMENT_SEARCH_TOOL)
+
         return tools
 
     def _execute_tool_call(self, tc_item: dict) -> tuple[str, str | None, dict]:
@@ -514,6 +519,11 @@ class Orchestrator:
                     f"[{i}] {r['source']}{section} (score={r['score']:.3f})\n{r['text']}"
                 )
             result_text = "\n\n".join(lines)
+            result_text += (
+                "\n\n---\n"
+                "В своём ответе укажи источники в конце в формате:\n"
+                "Источники:\n- filename [section]\n- ..."
+            )
             return result_text, "rag", {"results": results}
         except Exception as e:
             print(f"[WARN] document_search failed: {e}", file=sys.stderr)

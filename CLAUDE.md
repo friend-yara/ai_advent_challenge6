@@ -1,3 +1,6 @@
+IMPORTANT: This file defines the operating contract for Claude Code.
+Claude must follow these rules when modifying the repository.
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -11,6 +14,128 @@ SDK, no web framework.
 - **Language:** Python 3.12
 - **Platform:** Ubuntu 24.04, SSH-based VDS
 - **Entry point:** `llm_agent_cli.py` (REPL) / `agent.py` (core logic)
+
+---
+
+## Claude Code Operating Rules
+
+These rules define how Claude Code should operate in this repository.
+
+### Planning First
+
+Before implementing any non-trivial change Claude must:
+
+1. Explain the current implementation.
+2. Identify potential problems.
+3. Propose a short implementation plan.
+4. Wait for confirmation before editing files.
+
+Never refactor large parts of the codebase without an explicit request.
+
+---
+
+### Minimal Changes Principle
+
+Claude must always prefer **minimal diffs**.
+
+Allowed:
+
+- small targeted refactors
+- bug fixes
+- improving readability
+- adding missing type hints
+
+Not allowed unless explicitly requested:
+
+- rewriting modules
+- reorganizing directory structure
+- introducing new abstractions
+- changing architecture
+- adding frameworks
+
+---
+
+### Respect Existing Architecture
+
+This project intentionally follows a **simple architecture**:
+
+- small modules
+- explicit logic
+- minimal dependencies
+- no frameworks
+
+Claude must NOT introduce:
+
+- dependency injection frameworks
+- heavy abstractions
+- unnecessary classes
+- design patterns unless clearly beneficial.
+
+---
+
+### Never Guess Missing Requirements
+
+If a behavior is unclear Claude must:
+
+1. Ask a question
+2. Suggest options
+3. Wait for confirmation
+
+Do not invent business logic.
+
+---
+
+### Code Explanation Mode
+
+When the user asks about existing code:
+
+Claude must **only explain the code**.
+
+Do NOT modify files.
+
+---
+
+### Refactoring Rules
+
+Refactoring must follow this order:
+
+1. Explain the problem in the current code.
+2. Propose a safer refactor.
+3. Implement minimal changes.
+4. Ensure behavior remains unchanged.
+
+---
+
+### Git Rules
+
+Claude must NEVER automatically create commits unless the user explicitly asks.
+
+When asked to commit:
+
+1. Show `git status`
+2. Summarize changes
+3. Propose commit message
+4. Wait for confirmation
+5. Run `git commit`
+
+Never perform rebases, resets, or branch operations without explicit request.
+
+---
+
+## Communication Style
+
+When explaining technical details:
+
+- be concise
+- show file paths
+- show relevant code snippets
+- explain control flow step-by-step
+
+When proposing changes:
+
+- explain why
+- show minimal diff
+- avoid unnecessary verbosity
 
 ---
 
@@ -413,6 +538,91 @@ def set_state(self, new_state: str) -> str | None: ...
 No `logging` module — all output via `print()`. User-facing output to
 `stdout`; warnings and errors to `stderr`. Do not introduce `logging` unless
 explicitly requested.
+
+---
+
+## Python Implementation Preferences
+
+Prefer:
+
+- simple functions over complex class hierarchies
+- explicit code over clever abstractions
+- readability over micro-optimizations
+- small modules
+
+Avoid introducing:
+
+- metaclasses
+- decorators for control flow
+- hidden magic
+- overly generic utilities
+
+Keep the code easy to read for humans.
+
+---
+
+## Development Workflow
+
+Claude should follow this workflow when working on tasks.
+
+### Task Flow
+
+1. Understand the request
+2. Inspect relevant files
+3. Explain current behavior
+4. Propose implementation plan
+5. Wait for approval
+6. Implement changes
+7. Verify behavior
+8. Suggest commit
+
+---
+
+### Reading Code
+
+When investigating a feature Claude should trace execution in this order:
+
+1. CLI entrypoint (`llm_agent_cli.py`)
+2. Orchestrator (`orchestrator.py`)
+3. Context builder (`context_builder.py`)
+4. Agent logic (`agent.py`)
+5. Agent specs (`agents/*.md`)
+
+---
+
+### Safe Editing
+
+Claude must modify **only files directly related to the task**.
+
+Avoid unrelated formatting or cleanup changes.
+
+---
+
+## Refactor Safety Rules
+
+Claude must assume that the codebase is **experimental and evolving**.
+
+Therefore:
+
+- Do not refactor large areas of code.
+- Do not rename modules without a request.
+- Do not change public interfaces.
+- Do not modify agent prompt structure unless explicitly requested.
+
+Large refactors must be discussed first.
+
+---
+
+## Testing Policy
+
+Testing is optional in this project.
+
+If tests are added:
+
+- use `pytest`
+- keep tests small and focused
+- avoid heavy mocking
+- test public behavior, not internal implementation
 
 ---
 
