@@ -66,10 +66,11 @@ def compute_cost(pricing: dict, model: str, in_tok, out_tok):
 
 # Allowed TaskContext state transitions (strict graph)
 TASK_TRANSITIONS: dict[str, list[str]] = {
-    "PLANNING":   ["EXECUTION"],
+    "CHAT":       ["PLANNING"],
+    "PLANNING":   ["EXECUTION", "CHAT"],
     "EXECUTION":  ["VALIDATION", "PLANNING"],
     "VALIDATION": ["DONE", "EXECUTION"],
-    "DONE":       ["PLANNING"],
+    "DONE":       ["PLANNING", "CHAT"],
 }
 
 
@@ -359,9 +360,9 @@ class TaskContext:
     VALID_STATES = tuple(TASK_TRANSITIONS.keys())
 
     def __init__(self):
-        """Initialize with blank task in PLANNING state."""
+        """Initialize with blank task in CHAT state."""
         self.task: str = ""
-        self.state: str = "PLANNING"
+        self.state: str = "CHAT"
         self.step: int = 0
         self.total: int = 0
         self.plan: list[str] = []
@@ -406,7 +407,7 @@ class TaskContext:
     def from_dict(self, data: dict):
         """Restore from plain dict."""
         self.task = data.get("task", "") or ""
-        self.state = data.get("state", "PLANNING") or "PLANNING"
+        self.state = data.get("state", "CHAT") or "CHAT"
         self.step = data.get("step", 0) or 0
         self.total = data.get("total", 0) or 0
         self.plan = data.get("plan", []) or []

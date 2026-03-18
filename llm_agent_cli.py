@@ -124,6 +124,7 @@ def resolve_profile_paths(args: argparse.Namespace) -> argparse.Namespace:
 def state_prompt(tc, orchestrator: Orchestrator) -> str:
     """Return state-labeled prompt with active agent name, e.g. '[PLAN:planner] > '."""
     labels = {
+        "CHAT":       "CHAT",
         "PLANNING":   "PLAN",
         "EXECUTION":  "EXEC",
         "VALIDATION": "VALI",
@@ -146,7 +147,7 @@ Commands:
   /load                    Load working state from state.toon
   /goal <text>             Set task description (alias for /task)
   /task <text>             Set task in working memory
-  /state <s>               Transition state: PLANNING|PLAN, EXECUTION|EXEC,
+  /state <s>               Transition state: CHAT, PLANNING|PLAN, EXECUTION|EXEC,
                            VALIDATION|VALI, DONE
   /step                    Execute next step (EXECUTION state only)
   /agent <name>            Pin agent for next message only
@@ -168,6 +169,7 @@ Prompt format: [STATE:agent] >
   Example: [PLAN:planner] > or [EXEC:coder] >
 
 Agent auto-selection:
+  CHAT      → assistant
   PLANNING  → planner
   EXECUTION → coder
   VALIDATION → validator
@@ -349,7 +351,7 @@ def main():
     )
 
     # Welcome-back or fresh greeting
-    if state_was_loaded and (agent.tc.task or agent.tc.state != "PLANNING"):
+    if state_was_loaded and (agent.tc.task or agent.tc.state not in ("PLANNING", "CHAT")):
         try:
             print(agent.welcome_back())
         except Exception:
@@ -519,7 +521,10 @@ def main():
                     elif agent.tc.state == "DONE":
                         print("Задача завершена. Результаты ИИ следует "
                               "перепроверять вручную.")
-                        print("/state PLAN — начать новую задачу")
+                        agent.set_task_state("CHAT")
+                        print(f"OK: state={agent.tc.state}")
+                        print("Возврат в режим чата. "
+                              "/task + /state PLAN — новая задача.")
                     agent.save_state(args.state)
                 continue
             if text == "/step":
@@ -752,6 +757,7 @@ def main():
                     print(f"  - {v}")
 
             # In PLANNING: detect if LLM produced a todo checklist
+            # In CHAT: never parse plan — print answer directly
             if agent.tc.state == "PLANNING":
                 steps = agent.plan_from_reply(answer)
                 if steps:

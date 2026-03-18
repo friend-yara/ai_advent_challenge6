@@ -435,8 +435,8 @@ class Orchestrator:
         """
         tools: list[dict] = []
 
-        # MCP tools: planner only
-        if spec.name == "planner" and self.mcp is not None:
+        # MCP tools: planner and assistant
+        if spec.name in ("planner", "assistant") and self.mcp is not None:
             raw = self.mcp.all_tools_for_llm()
             if raw:
                 tools.extend(
