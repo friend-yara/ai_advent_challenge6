@@ -21,41 +21,109 @@ SDK, no web framework.
 
 These rules define how Claude Code should operate in this repository.
 
-### Planning First
+---
 
-Before implementing any non-trivial change Claude must:
+### 1. Hard Constraints (absolute — no exceptions)
 
-1. Explain the current implementation.
-2. Identify potential problems.
-3. Propose a short implementation plan.
-4. Wait for confirmation before editing files.
+These rules are binary. No undefined terms, no implicit exceptions.
 
-Never refactor large parts of the codebase without an explicit request.
+**HARD RULE 1:** Never edit a file not named in the current task description or confirmed plan.
+
+**HARD RULE 2:** Never create a new file unless the task explicitly says "create file `<name>`".
+
+**HARD RULE 3:** Never add an entry to `requirements.txt` without a user message containing the exact package name.
+
+**HARD RULE 4:** Never run any git write command (`commit`, `add`, `reset`, `push`, `branch -d`, `checkout -b`) without a user message in this session explicitly requesting it.
+
+**HARD RULE 5:** If a planned change requires touching more than 3 files, list all files and wait for confirmation before editing any of them.
+
+**HARD RULE 6:** Never modify `agents/*.md`, `profiles/`, or `INVARIANTS.yaml` unless the file path appears explicitly in the user's request.
+
+**HARD RULE 7:** Never rename any symbol (variable, function, class, file) without an explicit instruction naming both the old and new name.
+
+**HARD RULE 8:** "Yes" to a plan is not "yes" to each individual edit. If implementation diverges from the plan, pause and re-confirm.
+
+**HARD RULE 9:** After editing any file, report exactly which lines were changed. Do not batch-report "I made several changes."
+
+**HARD RULE 10:** A refactor is any change that does not fix a bug or add a feature. Refactors require their own explicit user request — they cannot be bundled into feature or bug-fix tasks.
+
+**HARD RULE 11 (Read before edit):** Never modify a file without having read it in the current session. No editing from memory or assumption about file contents.
+
+**HARD RULE 12 (Stop on scope expansion):** If implementation reveals the task requires touching more files or logic than the confirmed plan described, stop immediately, report the expansion, and wait for re-confirmation before continuing.
+
+**HARD RULE 13 (No unrequested fixes):** Never fix, change, or mention a problem in code that was not the explicit target of the current task. "While I'm here" changes are forbidden, even if the problem is obvious.
+
+**HARD RULE 14 (Explicit completion):** When a task is complete, explicitly state which files were changed and which line ranges were modified. Never silently stop. Never leave work half-done without explanation.
+
+**HARD RULE 15 (Never assume tool success):** If a tool call's output is absent, ambiguous, or shows an error, report it to the user immediately rather than proceeding as if it succeeded.
 
 ---
 
-### Minimal Changes Principle
+### 2. Planning Protocol
 
-Claude must always prefer **minimal diffs**.
+**Definition of trivial:** A change is trivial only if all three conditions hold:
+- (a) it touches exactly 1 file
+- (b) the diff is ≤5 lines
+- (c) no logic changes — only typos, formatting, or literal string fixes
 
-Allowed:
+Everything else is **non-trivial** and requires the full planning protocol:
 
-- small targeted refactors
+1. Explain the current implementation.
+2. Identify potential problems.
+3. Propose a short implementation plan with explicit file list.
+4. Wait for valid confirmation before editing any file.
+
+**Definition of valid confirmation:** An explicit affirmative — "yes", "go ahead", "do it", "implement", "proceed". Silence, emojis, or vague responses require re-asking.
+
+**Soft threshold:** If a change touches more than 3 files, list all files and wait for confirmation before editing any of them (even if each individual edit seems small).
+
+---
+
+### 3. Editing Rules
+
+**Before any edit:** declare every file to be modified. Do not edit files outside that list without re-confirming.
+
+Allowed without a separate refactor request (within the scope of the current task):
+
 - bug fixes
-- improving readability
 - adding missing type hints
+- renaming a variable/adding a comment in a file already being changed for the task
 
 Not allowed unless explicitly requested:
 
-- rewriting modules
+- readability cleanup as a standalone action
+- rewriting modules (>50% of file changed = rewrite)
 - reorganizing directory structure
 - introducing new abstractions
 - changing architecture
 - adding frameworks
+- moving code between files
+
+**Code Explanation Mode:** When the user asks about existing code, only explain. Do NOT modify files. The boundary is: "explain X" → explain only; "fix/change/add X" → follow planning protocol.
+
+**Never guess missing requirements.** If behavior is unclear: ask a question, suggest options, wait for confirmation. Do not invent business logic.
 
 ---
 
-### Respect Existing Architecture
+### 4. Git Protocol (canonical)
+
+Claude must NEVER automatically create commits unless the user explicitly asks.
+
+When asked to commit:
+
+1. Show `git status`
+2. Show `git diff` (summarize staged/unstaged changes)
+3. Propose commit message
+4. Wait for explicit confirmation
+5. Run `git commit`
+
+Never perform rebases, resets, force-pushes, or branch operations without explicit request.
+
+This project is a solo learning project on a single `main` branch. No branching strategy, PR rules, or multi-developer workflow apply unless explicitly requested.
+
+---
+
+### 5. Architecture Constraints
 
 This project intentionally follows a **simple architecture**:
 
@@ -69,60 +137,56 @@ Claude must NOT introduce:
 - dependency injection frameworks
 - heavy abstractions
 - unnecessary classes
-- design patterns unless clearly beneficial.
+- design patterns unless clearly beneficial
+
+**Protected configuration files** — require the file path to appear explicitly in the user's request before modification:
+
+- `agents/*.md`
+- `profiles/*/PROFILE.json`
+- `profiles/*/INVARIANTS.yaml`
+- `profiles/*/PROJECT_MEMORY.md`
 
 ---
 
-### Never Guess Missing Requirements
+### 6. Environment & Dependencies
 
-If a behavior is unclear Claude must:
-
-1. Ask a question
-2. Suggest options
-3. Wait for confirmation
-
-Do not invent business logic.
+- venv only — no system-wide pip installs (PEP 668)
+- After adding a dependency: pin its exact version in `requirements.txt`
+- **Approval required:** Adding any new package requires a user message containing the exact package name. Claude must not add packages based on inferred need.
 
 ---
 
-### Code Explanation Mode
+### 7. Session Behavior
 
-When the user asks about existing code:
-
-Claude must **only explain the code**.
-
-Do NOT modify files.
+- On corrupt or unreadable `state.toon` / `short_term.toon`: warn to stderr, do not auto-repair, ask user.
+- On ambiguous task: ask, do not infer.
+- On scope creep (task grows beyond original description): pause, describe the expansion, ask user to confirm before proceeding.
 
 ---
 
-### Refactoring Rules
+### 8. Code Style (guidelines — not enforced constraints)
 
-Refactoring must follow this order:
+These signal intent. They are not binary rules and have no enforcement surface.
 
-1. Explain the problem in the current code.
-2. Propose a safer refactor.
-3. Implement minimal changes.
-4. Ensure behavior remains unchanged.
+**Imports:** stdlib → third-party → local. One import per line.
 
----
+**Type hints:** Python 3.10+ union syntax (`float | None`). Annotate all non-trivial parameters and return types.
 
-### Git Rules
+**Naming:** `snake_case` for variables/functions, `PascalCase` for classes, `SCREAMING_SNAKE_CASE` for constants, `_underscore_prefix` for private methods.
 
-Claude must NEVER automatically create commits unless the user explicitly asks.
+**Formatting:** f-strings for interpolation; `json.dumps(..., ensure_ascii=False, indent=2)` for JSON; section separators `# ---------------- Name ----------------`; aim for lines under 100 chars (no enforcer).
 
-When asked to commit:
+**Docstrings:** one-line on public methods; multi-line for classes; private trivial helpers may omit.
 
-1. Show `git status`
-2. Summarize changes
-3. Propose commit message
-4. Wait for confirmation
-5. Run `git commit`
+**Error handling:** catch specific exceptions; `RuntimeError` for unrecoverable API failures; warnings to `sys.stderr`; no bare `except:`.
 
-Never perform rebases, resets, or branch operations without explicit request.
+**Logging:** no `logging` module — `print()` only; user-facing to stdout, errors/warnings to stderr.
+
+**Preferences:** simple functions > complex hierarchies; explicit code > clever abstractions; readability > micro-optimizations.
 
 ---
 
-## Communication Style
+### 9. Communication Style
 
 When explaining technical details:
 
@@ -466,7 +530,7 @@ context_policy:
 
 ---
 
-## Code Style
+## Code Style (guidelines — reference detail for §8)
 
 ### Imports
 
@@ -541,42 +605,7 @@ explicitly requested.
 
 ---
 
-## Python Implementation Preferences
-
-Prefer:
-
-- simple functions over complex class hierarchies
-- explicit code over clever abstractions
-- readability over micro-optimizations
-- small modules
-
-Avoid introducing:
-
-- metaclasses
-- decorators for control flow
-- hidden magic
-- overly generic utilities
-
-Keep the code easy to read for humans.
-
----
-
 ## Development Workflow
-
-Claude should follow this workflow when working on tasks.
-
-### Task Flow
-
-1. Understand the request
-2. Inspect relevant files
-3. Explain current behavior
-4. Propose implementation plan
-5. Wait for approval
-6. Implement changes
-7. Verify behavior
-8. Suggest commit
-
----
 
 ### Reading Code
 
@@ -587,29 +616,6 @@ When investigating a feature Claude should trace execution in this order:
 3. Context builder (`context_builder.py`)
 4. Agent logic (`agent.py`)
 5. Agent specs (`agents/*.md`)
-
----
-
-### Safe Editing
-
-Claude must modify **only files directly related to the task**.
-
-Avoid unrelated formatting or cleanup changes.
-
----
-
-## Refactor Safety Rules
-
-Claude must assume that the codebase is **experimental and evolving**.
-
-Therefore:
-
-- Do not refactor large areas of code.
-- Do not rename modules without a request.
-- Do not change public interfaces.
-- Do not modify agent prompt structure unless explicitly requested.
-
-Large refactors must be discussed first.
 
 ---
 
