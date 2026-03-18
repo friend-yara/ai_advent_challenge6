@@ -73,3 +73,49 @@ def search(
             "score": float(score),
         })
     return results
+
+
+def filter_results(
+    results: list[dict],
+    threshold: float,
+    query: str,
+    use_keyword: bool,
+) -> tuple[list[dict], list[dict]]:
+    """Filter results by similarity threshold and optional keyword overlap.
+
+    Returns (kept, dropped). Each dropped item gets a 'filtered_reason' key added.
+    """
+    significant_words = [w.lower() for w in query.split() if len(w) >= 4]
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for r in results:
+        if r["score"] < threshold:
+            r["filtered_reason"] = "score"
+            dropped.append(r)
+            continue
+        if use_keyword and significant_words:
+            text_lower = r["text"].lower()
+            if not any(w in text_lower for w in significant_words):
+                r["filtered_reason"] = "keyword"
+                dropped.append(r)
+                continue
+        kept.append(r)
+    return kept, dropped
+
+
+def search_improved(
+    query: str,
+    initial_top_k: int = 15,
+    final_top_k: int = 5,
+    threshold: float = 0.3,
+    use_keyword: bool = False,
+    chunker: str | None = None,
+    index_dir: Path | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Improved search: initial broad retrieval → threshold filter → keyword filter → top N.
+
+    Returns (final_results[:final_top_k], dropped).
+    """
+    results = search(query, top_k=initial_top_k, chunker=chunker, index_dir=index_dir)
+    kept, dropped = filter_results(results, threshold, query, use_keyword)
+    return kept[:final_top_k], dropped

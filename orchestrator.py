@@ -34,6 +34,13 @@ import sys
 from agents import AgentRegistry, AgentSpec
 from context_builder import ContextBuilder
 
+try:
+    from langdetect import detect as _langdetect
+    from langdetect.lang_detect_exception import LangDetectException as _LangDetectException
+    _LANGDETECT_AVAILABLE = True
+except ImportError:
+    _LANGDETECT_AVAILABLE = False
+
 # ---------------- RAG tool definition ----------------
 
 _DOCUMENT_SEARCH_TOOL = {
@@ -97,8 +104,27 @@ class Orchestrator:
         self.mcp = mcp
         # Pinned agent for the next turn only (set via /agent <name>)
         self._pinned_agent: str | None = None
-        # RAG toggle — set to True at REPL startup if index exists
-        self.rag_enabled: bool = False
+        # RAG mode — "off" | "base" | "filter"; set at REPL startup if index exists
+        self.rag_mode: str = "off"
+        self.rag_initial_top_k: int = 15
+        self.rag_final_top_k: int = 5
+        self.rag_similarity_threshold: float = 0.45
+        self.rag_use_keyword_filter: bool = False
+        self.rag_index_lang: str = "en"  # ожидаемый язык индекса
+
+    @property
+    def rag_enabled(self) -> bool:
+        """Derived: True when rag_mode is 'base' or 'filter'."""
+        return self.rag_mode != "off"
+
+    def _detect_lang(self, text: str) -> str | None:
+        """Detect language of text; returns ISO 639-1 code or None on failure."""
+        if not _LANGDETECT_AVAILABLE:
+            return None
+        try:
+            return _langdetect(text)
+        except _LangDetectException:
+            return None
 
     # ---------------- Public API ----------------
 
@@ -119,6 +145,15 @@ class Orchestrator:
         (reply_text, metrics_dict)
         metrics includes: model, time, in, out, cost, agent, pre_violations
         """
+        if self.rag_enabled:
+            lang = self._detect_lang(user_text)
+            if lang and lang != self.rag_index_lang:
+                print(
+                    f"[RAG WARN] Язык запроса '{lang}' отличается от языка индекса '{self.rag_index_lang}'. "
+                    f"Качество поиска может быть низким.",
+                    file=sys.stderr,
+                )
+
         ag = self.agent
         tc = ag.tc
         stm = ag.stm
@@ -445,7 +480,7 @@ class Orchestrator:
                 )
 
         # RAG tool: all agents when enabled
-        if self.rag_enabled:
+        if self.rag_mode != "off":
             tools.append(_DOCUMENT_SEARCH_TOOL)
 
         return tools
@@ -498,33 +533,100 @@ class Orchestrator:
             print(f"[WARN] Tool call '{tool_name}' failed: {e}", file=sys.stderr)
             return f"Tool call failed: {e}", None, {}
 
+    def _rewrite_query_for_retrieval(self, query: str) -> str:
+        """Rewrite user query into retrieval-optimised keywords via LLM mini-call.
+
+        On any exception falls back to returning the original query unchanged.
+        """
+        prompt = (
+            "Преобразуй вопрос в ключевые слова для поиска по документам. "
+            "Только ключевые слова, без пояснений.\n"
+            f"Вопрос: {query}"
+        )
+        payload: dict = {
+            "model": "gpt-4.1-mini",
+            "input": prompt,
+            "max_output_tokens": 60,
+            "temperature": 0.0,
+        }
+        try:
+            data, _ = self.agent._post(payload)
+            rewritten = _extract_text(data).strip()
+            return rewritten if rewritten else query
+        except Exception:
+            return query
+
     def _execute_document_search(self, arguments: dict) -> tuple[str, str, dict]:
         """
         Execute a local RAG document_search tool call.
 
         Returns (result_text, server_name, result_data).
+        Behaviour depends on self.rag_mode: "base" uses simple search; "filter"
+        uses query rewriting + threshold filtering.
         """
         query = arguments.get("query", "")
         top_k = int(arguments.get("top_k", 5))
         try:
-            from rag.retriever import search
-            results = search(query, top_k=top_k)
-            if not results:
-                result_text = "No relevant documents found."
-                return result_text, "rag", {"results": []}
-            lines = []
-            for i, r in enumerate(results, 1):
-                section = f" [{r['section']}]" if r["section"] else ""
-                lines.append(
-                    f"[{i}] {r['source']}{section} (score={r['score']:.3f})\n{r['text']}"
+            if self.rag_mode == "base":
+                from rag.retriever import search
+                results = search(query, top_k=top_k)
+                if not results:
+                    return "No relevant documents found.", "rag", {"results": [], "mode": "base"}
+                lines = []
+                for i, r in enumerate(results, 1):
+                    section = f" [{r['section']}]" if r["section"] else ""
+                    lines.append(
+                        f"[{i}] {r['source']}{section} (score={r['score']:.3f})\n{r['text']}"
+                    )
+                result_text = "\n\n".join(lines)
+                result_text += (
+                    "\n\n---\n"
+                    "В своём ответе укажи источники в конце в формате:\n"
+                    "Источники:\n- filename [section]\n- ..."
                 )
-            result_text = "\n\n".join(lines)
-            result_text += (
-                "\n\n---\n"
-                "В своём ответе укажи источники в конце в формате:\n"
-                "Источники:\n- filename [section]\n- ..."
-            )
-            return result_text, "rag", {"results": results}
+                return result_text, "rag", {"results": results, "mode": "base"}
+            else:
+                # rag_mode == "filter"
+                from rag.retriever import search_improved
+                rewritten = self._rewrite_query_for_retrieval(query)
+                final_results, dropped = search_improved(
+                    rewritten,
+                    initial_top_k=self.rag_initial_top_k,
+                    final_top_k=self.rag_final_top_k,
+                    threshold=self.rag_similarity_threshold,
+                    use_keyword=self.rag_use_keyword_filter,
+                )
+                if not final_results:
+                    result_data = {
+                        "results": [],
+                        "mode": "filter",
+                        "original_query": query,
+                        "rewritten_query": rewritten if rewritten != query else None,
+                        "initial_count": self.rag_initial_top_k,
+                        "filtered_out": dropped,
+                    }
+                    return "No relevant documents found.", "rag", result_data
+                lines = []
+                for i, r in enumerate(final_results, 1):
+                    section = f" [{r['section']}]" if r["section"] else ""
+                    lines.append(
+                        f"[{i}] {r['source']}{section} (score={r['score']:.3f})\n{r['text']}"
+                    )
+                result_text = "\n\n".join(lines)
+                result_text += (
+                    "\n\n---\n"
+                    "В своём ответе укажи источники в конце в формате:\n"
+                    "Источники:\n- filename [section]\n- ..."
+                )
+                result_data = {
+                    "results": final_results,
+                    "mode": "filter",
+                    "original_query": query,
+                    "rewritten_query": rewritten if rewritten != query else None,
+                    "initial_count": self.rag_initial_top_k,
+                    "filtered_out": dropped,
+                }
+                return result_text, "rag", result_data
         except Exception as e:
             print(f"[WARN] document_search failed: {e}", file=sys.stderr)
             return f"document_search failed: {e}", "rag", {}

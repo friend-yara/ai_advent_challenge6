@@ -162,8 +162,10 @@ Commands:
   /whoami                  Short LLM-generated summary of current profile
   /tool list               List all configured MCP servers
   /tool list <server>      Connect to MCP server and show available tools
-  /rag                     Show RAG status (on/off + index)
-  /rag on|off              Enable or disable RAG retrieval
+  /rag                     Show RAG status (mode, threshold, keyword)
+  /rag base|filter|off     Switch RAG mode
+  /rag threshold <float>   Set similarity threshold (default 0.45)
+  /rag keyword on|off      Enable/disable keyword filter (default off)
 
 Prompt format: [STATE:agent] >
   Example: [PLAN:planner] > or [EXEC:coder] >
@@ -318,12 +320,13 @@ def main():
     mcp.load()
 
     orchestrator = Orchestrator(agent, registry, ContextBuilder(), pricing, mcp=mcp)
-    orchestrator.rag_enabled = rag_available()
+    orchestrator.rag_mode = "filter" if rag_available() else "off"
 
     print(f"Agents loaded: {registry.summary()}")
     print(f"MCP servers:   {mcp.summary()}")
     print(f"MCP tools:     {mcp.tools_summary()}")
-    print(f"RAG:           {'включён' if orchestrator.rag_enabled else 'выключен (нет индекса)'}")
+    _rag_init = f"режим={orchestrator.rag_mode}" if orchestrator.rag_mode != "off" else "выключен (нет индекса)"
+    print(f"RAG:           {_rag_init}")
 
     # Auto-load working state on startup (if file exists)
     state_was_loaded = False
@@ -604,9 +607,8 @@ def main():
                 print(f"[orch]    agents={registry.summary()}, "
                       f"active={orchestrator.current_agent_name()}")
                 print(f"[mcp]     {mcp.summary()}")
-                rag_status = "on" if orchestrator.rag_enabled else "off"
                 rag_idx = "index=ok" if rag_available() else "index=missing"
-                print(f"[rag]     {rag_status}, {rag_idx}")
+                print(f"[rag]     mode={orchestrator.rag_mode}, {rag_idx}")
                 continue
             if text == "/checkpoint":
                 agent.checkpoint()
@@ -724,23 +726,40 @@ def main():
                     _run_indexing(_chunker)
                 continue
             if text.startswith("/rag"):
-                parts = text.split(maxsplit=1)
+                parts = text.split(maxsplit=2)
                 sub = parts[1].strip().lower() if len(parts) > 1 else ""
-                if sub == "on":
+                if sub in ("base", "filter"):
                     if not rag_available():
                         print("ERROR: RAG-индекс не найден. Запустите /index.")
                     else:
-                        orchestrator.rag_enabled = True
-                        print("OK: RAG включён")
+                        orchestrator.rag_mode = sub
+                        print(f"OK: RAG режим = {sub}")
                 elif sub == "off":
-                    orchestrator.rag_enabled = False
+                    orchestrator.rag_mode = "off"
                     print("OK: RAG выключен")
+                elif sub == "threshold":
+                    val = parts[2].strip() if len(parts) > 2 else ""
+                    try:
+                        orchestrator.rag_similarity_threshold = float(val)
+                        print(f"OK: RAG threshold = {orchestrator.rag_similarity_threshold}")
+                    except ValueError:
+                        print("Использование: /rag threshold <float>  (например: /rag threshold 0.45)")
+                elif sub == "keyword":
+                    val = parts[2].strip().lower() if len(parts) > 2 else ""
+                    if val == "on":
+                        orchestrator.rag_use_keyword_filter = True
+                        print("OK: RAG keyword-фильтр включён")
+                    elif val == "off":
+                        orchestrator.rag_use_keyword_filter = False
+                        print("OK: RAG keyword-фильтр выключен")
+                    else:
+                        print("Использование: /rag keyword on|off")
                 elif sub == "":
-                    status = "включён" if orchestrator.rag_enabled else "выключен"
                     idx_str = "индекс найден" if rag_available() else "индекс отсутствует"
-                    print(f"RAG: {status} ({idx_str})")
+                    kw = "on" if orchestrator.rag_use_keyword_filter else "off"
+                    print(f"RAG: режим={orchestrator.rag_mode}, threshold={orchestrator.rag_similarity_threshold}, keyword={kw} ({idx_str})")
                 else:
-                    print("Использование: /rag | /rag on | /rag off")
+                    print("Использование: /rag | /rag base|filter|off | /rag threshold <float> | /rag keyword on|off")
                 continue
             print("Unknown command")
             continue
@@ -802,19 +821,39 @@ def main():
                 elif _tname == "save_to_file":
                     _print_cli(f"storage:save_to_file: {tr.get('result_text', '').strip()[:120]}")
                 elif _tname == "document_search":
-                    _results = tr.get("data", {}).get("results", [])
-                    _query = tr.get("arguments", {}).get("query", "")
-                    _print_cli(f"[RAG] query: {_query!r}")
-                    _print_cli(f"[RAG] Retrieved {len(_results)} chunk(s):")
-                    for _ci, _r in enumerate(_results, 1):
-                        _section = f" [{_r['section']}]" if _r.get("section") else ""
-                        _score = _r.get("score", 0.0)
-                        _text_preview = _r.get("text", "")[:80].replace("\n", " ")
-                        _print_cli(
-                            f"  [{_ci}] {_r.get('source', '?')}{_section}"
-                            f"  score={_score:.3f}"
-                        )
-                        _print_cli(f"      {_text_preview}")
+                    _data = tr.get("data", {})
+                    _results = _data.get("results", [])
+                    _rag_mode = _data.get("mode", "base")
+
+                    # дедупликация источников: максимальный score на файл
+                    _seen: dict[str, float] = {}
+                    for _r in _results:
+                        _src = _r.get("source", "?")
+                        _sc = _r.get("score", 0.0)
+                        if _src not in _seen or _sc > _seen[_src]:
+                            _seen[_src] = _sc
+                    _sources_str = " ".join(
+                        f"{s}({sc:.2f})" for s, sc in sorted(_seen.items(), key=lambda x: -x[1])
+                    )
+
+                    if _rag_mode == "filter":
+                        _orig = _data.get("original_query") or tr.get("arguments", {}).get("query", "")
+                        _rewritten = _data.get("rewritten_query")
+                        _initial = _data.get("initial_count", 0)
+                        _kept = len(_results)
+                        _dropped_count = len(_data.get("filtered_out", []))
+
+                        _query_part = f'"{_orig}"'
+                        if _rewritten and _rewritten != _orig:
+                            _query_part += f' → "{_rewritten}"'
+
+                        _pipeline_part = f"{_initial}→{_kept}"
+                        if _dropped_count:
+                            _pipeline_part += f" (−{_dropped_count})"
+
+                        _print_cli(f"[RAG:filter] {_query_part} | {_pipeline_part} | {_sources_str}")
+                    else:
+                        _print_cli(f"[RAG:base] {len(_results)} chunks | {_sources_str}")
 
             # Auto-save working state after each successful turn
             try:
