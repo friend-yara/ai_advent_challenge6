@@ -97,6 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--batch-file", default=None,
                    help="Read REPL input from file instead of terminal")
+    p.add_argument("--interactive-batch", default=None,
+                   help="Like --batch-file but prompts for follow-up after each answer")
 
     return p
 
@@ -198,6 +200,60 @@ def _print_cli(msg: str) -> None:
             print(msg, flush=True)
     else:
         print(msg, flush=True)
+
+
+def _print_rag_answer(answer: str, rag_results: list, rag_metadata: dict) -> None:
+    """Print structured RAG output: Answer / Sources / Quotes.
+
+    If rag_results is empty (weak context), prints answer only — no sections.
+    """
+    from rag.retriever import extract_quote
+
+    print(answer, end="")
+
+    if not rag_results:
+        return
+
+    # Sources — deduplicated by (filename, section), ordered by score desc
+    print()
+    print("Sources:")
+    seen_sources: set[tuple] = set()
+    ordered: list[dict] = sorted(rag_results, key=lambda r: r.get("score", 0.0), reverse=True)
+    for r in ordered:
+        key = (r.get("filename", r.get("source", "?")), r.get("section", ""))
+        if key in seen_sources:
+            continue
+        seen_sources.add(key)
+        fname = r.get("filename", r.get("source", "?"))
+        section = r.get("section") or ""
+        chunk_id = r.get("id", "")
+        parts = [fname]
+        if section:
+            parts.append(section)
+        if chunk_id:
+            parts.append(chunk_id)
+        print(f"  - {' | '.join(parts)}")
+
+    # Quotes — one per unique chunk, grouped by filename
+    print()
+    printed_ids: set[str] = set()
+    for r in ordered:
+        chunk_id = r.get("id", "")
+        if chunk_id in printed_ids:
+            continue
+        printed_ids.add(chunk_id)
+        fname = r.get("filename", r.get("source", "?"))
+        section = r.get("section") or ""
+        label_parts = [fname]
+        if section:
+            label_parts.append(section)
+        if chunk_id:
+            label_parts.append(chunk_id)
+        label = " | ".join(label_parts)
+        quote = extract_quote(r.get("text", ""))
+        print(f'Quotes ({label}):')
+        print(f'  "{quote}"')
+        print()
 
 
 def _execute_pipeline(pipeline: list[dict], job_id: str, orch):
@@ -386,9 +442,14 @@ def main():
         session = PromptSession(mouse_support=False)
 
     _batch_iter = None
+    _interactive_batch_iter = None
+    _interactive_batch_followup = False  # True when processing a follow-up after a batch question
     if args.batch_file:
         _batch_fh = open(args.batch_file, encoding="utf-8")
         _batch_iter = iter(_batch_fh)
+    if getattr(args, "interactive_batch", None):
+        _ibatch_fh = open(args.interactive_batch, encoding="utf-8")
+        _interactive_batch_iter = iter(_ibatch_fh)
 
     while True:
         try:
@@ -399,6 +460,24 @@ def main():
                     print(f"{prompt_str}{text}")
                 except StopIteration:
                     break
+            elif _interactive_batch_iter is not None and not _interactive_batch_followup:
+                try:
+                    text = next(_interactive_batch_iter).strip()
+                    print(f"{prompt_str}{text}")
+                    _interactive_batch_followup = True  # will prompt for follow-up after answer
+                except StopIteration:
+                    break
+            elif _interactive_batch_iter is not None and _interactive_batch_followup:
+                # Prompt for optional follow-up after each batch answer
+                _fu_prompt = "[follow-up or Enter to continue]: "
+                if session is not None:
+                    with patch_stdout():
+                        text = session.prompt(_fu_prompt, multiline=False).strip()
+                else:
+                    text = input(_fu_prompt).strip()
+                if not text:
+                    _interactive_batch_followup = False  # no follow-up → next batch question
+                    continue
             elif session is not None:
                 with patch_stdout():
                     text = session.prompt(
@@ -754,17 +833,31 @@ def main():
                         print("OK: RAG keyword-фильтр выключен")
                     else:
                         print("Использование: /rag keyword on|off")
+                elif sub == "min":
+                    val = parts[2].strip() if len(parts) > 2 else ""
+                    try:
+                        orchestrator.rag_min_results = int(val)
+                        print(f"OK: RAG min_results = {orchestrator.rag_min_results}")
+                    except ValueError:
+                        print("Использование: /rag min <int>  (например: /rag min 1)")
                 elif sub == "":
                     idx_str = "индекс найден" if rag_available() else "индекс отсутствует"
                     kw = "on" if orchestrator.rag_use_keyword_filter else "off"
-                    print(f"RAG: режим={orchestrator.rag_mode}, threshold={orchestrator.rag_similarity_threshold}, keyword={kw} ({idx_str})")
+                    print(
+                        f"RAG: режим={orchestrator.rag_mode}, "
+                        f"threshold={orchestrator.rag_similarity_threshold}, "
+                        f"keyword={kw}, min_results={orchestrator.rag_min_results} "
+                        f"({idx_str})"
+                    )
                 else:
-                    print("Использование: /rag | /rag base|filter|off | /rag threshold <float> | /rag keyword on|off")
+                    print("Использование: /rag | /rag base|filter|off | /rag threshold <float> | /rag keyword on|off | /rag min <int>")
                 continue
             print("Unknown command")
             continue
 
         try:
+            orchestrator.last_rag_results = []
+            orchestrator.last_rag_metadata = {}
             answer, metrics = orchestrator.reply(text)
 
             # Print pre-check warnings if any banned patterns were detected
@@ -774,6 +867,9 @@ def main():
                       "запрещённых правил:")
                 for v in pre_violations:
                     print(f"  - {v}")
+
+            # Detect if RAG document_search was invoked this turn
+            _has_rag_results = bool(orchestrator.last_rag_results)
 
             # In PLANNING: detect if LLM produced a todo checklist
             # In CHAT: never parse plan — print answer directly
@@ -785,15 +881,24 @@ def main():
                     agent.tc.step = 0
                     agent.tc.done = []
                     agent.tc.current = steps[0]
-                    print(answer, end="")
+                    if _has_rag_results:
+                        _print_rag_answer(answer, orchestrator.last_rag_results, orchestrator.last_rag_metadata)
+                    else:
+                        print(answer, end="")
                     print_metrics(metrics)
                     print("Готов перейти к выполнению. "
                           "Введите /state EXEC или внесите корректировки.")
                 else:
-                    print(answer, end="")
+                    if _has_rag_results:
+                        _print_rag_answer(answer, orchestrator.last_rag_results, orchestrator.last_rag_metadata)
+                    else:
+                        print(answer, end="")
                     print_metrics(metrics)
             else:
-                print(answer, end="")
+                if _has_rag_results:
+                    _print_rag_answer(answer, orchestrator.last_rag_results, orchestrator.last_rag_metadata)
+                else:
+                    print(answer, end="")
                 print_metrics(metrics)
 
             # Start reminder poller if a reminder tool was called

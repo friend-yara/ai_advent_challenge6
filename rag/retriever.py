@@ -103,6 +103,18 @@ def filter_results(
     return kept, dropped
 
 
+def extract_quote(text: str, max_chars: int = 180) -> str:
+    """Extract a readable quote from chunk text, truncated at word boundary."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    last_space = truncated.rfind(" ")
+    if last_space > max_chars // 2:
+        truncated = truncated[:last_space]
+    return truncated + "…"
+
+
 def search_improved(
     query: str,
     initial_top_k: int = 15,

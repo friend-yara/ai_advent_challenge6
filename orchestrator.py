@@ -111,6 +111,9 @@ class Orchestrator:
         self.rag_similarity_threshold: float = 0.45
         self.rag_use_keyword_filter: bool = False
         self.rag_index_lang: str = "en"  # ожидаемый язык индекса
+        self.rag_min_results: int = 1    # минимум чанков для "strong context"
+        self.last_rag_results: list = []
+        self.last_rag_metadata: dict = {}
 
     @property
     def rag_enabled(self) -> bool:
@@ -563,28 +566,44 @@ class Orchestrator:
         Returns (result_text, server_name, result_data).
         Behaviour depends on self.rag_mode: "base" uses simple search; "filter"
         uses query rewriting + threshold filtering.
+
+        Grounding logic:
+        - weak context (0 results): tool instructs LLM to refuse answering.
+        - strong context (results present): tool instructs LLM to answer ONLY
+          from retrieved chunks; REPL handles Sources/Quotes rendering.
         """
         query = arguments.get("query", "")
         top_k = int(arguments.get("top_k", 5))
+        _GROUNDED_HINT = (
+            "\n\n---\n"
+            "Ответь на вопрос, опираясь ТОЛЬКО на приведённые документы. "
+            "Не используй внешние знания."
+        )
+        _WEAK_CONTEXT_MSG = (
+            "Контекст: релевантных документов не найдено.\n\n"
+            "ВАЖНО: Ты НЕ ДОЛЖЕН отвечать по существу вопроса. "
+            "Скажи пользователю, что не удалось найти релевантную информацию, "
+            "и попроси уточнить запрос. Не используй внешние знания."
+        )
         try:
             if self.rag_mode == "base":
                 from rag.retriever import search
                 results = search(query, top_k=top_k)
-                if not results:
-                    return "No relevant documents found.", "rag", {"results": [], "mode": "base"}
+                result_data = {"results": results, "mode": "base"}
+                if len(results) < self.rag_min_results:
+                    self.last_rag_results = []
+                    self.last_rag_metadata = result_data
+                    return _WEAK_CONTEXT_MSG, "rag", result_data
+                self.last_rag_results = results
+                self.last_rag_metadata = result_data
                 lines = []
                 for i, r in enumerate(results, 1):
                     section = f" [{r['section']}]" if r["section"] else ""
                     lines.append(
                         f"[{i}] {r['source']}{section} (score={r['score']:.3f})\n{r['text']}"
                     )
-                result_text = "\n\n".join(lines)
-                result_text += (
-                    "\n\n---\n"
-                    "В своём ответе укажи источники в конце в формате:\n"
-                    "Источники:\n- filename [section]\n- ..."
-                )
-                return result_text, "rag", {"results": results, "mode": "base"}
+                result_text = "\n\n".join(lines) + _GROUNDED_HINT
+                return result_text, "rag", result_data
             else:
                 # rag_mode == "filter"
                 from rag.retriever import search_improved
@@ -596,28 +615,6 @@ class Orchestrator:
                     threshold=self.rag_similarity_threshold,
                     use_keyword=self.rag_use_keyword_filter,
                 )
-                if not final_results:
-                    result_data = {
-                        "results": [],
-                        "mode": "filter",
-                        "original_query": query,
-                        "rewritten_query": rewritten if rewritten != query else None,
-                        "initial_count": self.rag_initial_top_k,
-                        "filtered_out": dropped,
-                    }
-                    return "No relevant documents found.", "rag", result_data
-                lines = []
-                for i, r in enumerate(final_results, 1):
-                    section = f" [{r['section']}]" if r["section"] else ""
-                    lines.append(
-                        f"[{i}] {r['source']}{section} (score={r['score']:.3f})\n{r['text']}"
-                    )
-                result_text = "\n\n".join(lines)
-                result_text += (
-                    "\n\n---\n"
-                    "В своём ответе укажи источники в конце в формате:\n"
-                    "Источники:\n- filename [section]\n- ..."
-                )
                 result_data = {
                     "results": final_results,
                     "mode": "filter",
@@ -626,9 +623,24 @@ class Orchestrator:
                     "initial_count": self.rag_initial_top_k,
                     "filtered_out": dropped,
                 }
+                if len(final_results) < self.rag_min_results:
+                    self.last_rag_results = []
+                    self.last_rag_metadata = result_data
+                    return _WEAK_CONTEXT_MSG, "rag", result_data
+                self.last_rag_results = final_results
+                self.last_rag_metadata = result_data
+                lines = []
+                for i, r in enumerate(final_results, 1):
+                    section = f" [{r['section']}]" if r["section"] else ""
+                    lines.append(
+                        f"[{i}] {r['source']}{section} (score={r['score']:.3f})\n{r['text']}"
+                    )
+                result_text = "\n\n".join(lines) + _GROUNDED_HINT
                 return result_text, "rag", result_data
         except Exception as e:
             print(f"[WARN] document_search failed: {e}", file=sys.stderr)
+            self.last_rag_results = []
+            self.last_rag_metadata = {}
             return f"document_search failed: {e}", "rag", {}
 
     def _call_with_tool_results(
