@@ -108,7 +108,7 @@ class Orchestrator:
         self.rag_mode: str = "off"
         self.rag_initial_top_k: int = 15
         self.rag_final_top_k: int = 5
-        self.rag_similarity_threshold: float = 0.45
+        self.rag_similarity_threshold: float = 0.38
         self.rag_use_keyword_filter: bool = False
         self.rag_index_lang: str = "en"  # ожидаемый язык индекса
         self.rag_min_results: int = 1    # минимум чанков для "strong context"
@@ -188,6 +188,13 @@ class Orchestrator:
 
         # Build context prompt
         prompt = self.ctx.build(spec, user_text, tc, stm, ltm, ag.facts)
+
+        # RAG pre-search: always search before LLM call, inject results into prompt
+        if self.rag_enabled:
+            rag_text, _, rag_data = self._execute_document_search({"query": user_text})
+            prompt += "\n\n" + rag_text
+            # Remove tool from list — search already executed by the system
+            tools_for_llm = [t for t in tools_for_llm if t["name"] != "document_search"]
 
         # ---------- LLM call 1 ----------
         payload: dict = {"model": spec.model, "input": prompt}
@@ -543,9 +550,9 @@ class Orchestrator:
         On any exception falls back to returning the original query unchanged.
         """
         prompt = (
-            "Преобразуй вопрос в ключевые слова для поиска по документам. "
-            "Только ключевые слова, без пояснений.\n"
-            f"Вопрос: {query}"
+            "Convert the question into English keywords for document search. "
+            "Output only keywords, no explanations.\n"
+            f"Question: {query}"
         )
         payload: dict = {
             "model": "gpt-4.1-mini",
@@ -609,6 +616,7 @@ class Orchestrator:
                 # rag_mode == "filter"
                 from rag.retriever import search_improved
                 rewritten = self._rewrite_query_for_retrieval(query)
+                fallback_used = False
                 final_results, dropped = search_improved(
                     rewritten,
                     initial_top_k=self.rag_initial_top_k,
@@ -616,11 +624,23 @@ class Orchestrator:
                     threshold=self.rag_similarity_threshold,
                     use_keyword=self.rag_use_keyword_filter,
                 )
+                # Fallback: if rewritten query returned too few results,
+                # retry with the original query
+                if len(final_results) < self.rag_min_results and rewritten != query:
+                    final_results, dropped = search_improved(
+                        query,
+                        initial_top_k=self.rag_initial_top_k,
+                        final_top_k=self.rag_final_top_k,
+                        threshold=self.rag_similarity_threshold,
+                        use_keyword=self.rag_use_keyword_filter,
+                    )
+                    fallback_used = True
                 result_data = {
                     "results": final_results,
                     "mode": "filter",
                     "original_query": query,
                     "rewritten_query": rewritten if rewritten != query else None,
+                    "fallback_used": fallback_used,
                     "initial_count": self.rag_initial_top_k,
                     "filtered_out": dropped,
                 }

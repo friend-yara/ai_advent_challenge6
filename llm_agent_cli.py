@@ -164,7 +164,8 @@ Commands:
   /whoami                  Short LLM-generated summary of current profile
   /tool list               List all configured MCP servers
   /tool list <server>      Connect to MCP server and show available tools
-  /rag                     Show RAG status (mode, threshold, keyword)
+  /index <путь> [fixed|structured]  Перестроить RAG-индекс по указанному пути
+  /rag                     Show RAG status (mode, threshold, keyword, corpus)
   /rag base|filter|off     Switch RAG mode
   /rag threshold <float>   Set similarity threshold (default 0.45)
   /rag keyword on|off      Enable/disable keyword filter (default off)
@@ -203,10 +204,7 @@ def _print_cli(msg: str) -> None:
 
 
 def _print_rag_answer(answer: str, rag_results: list, rag_metadata: dict) -> None:
-    """Print structured RAG output: Answer / Sources / Quotes.
-
-    If rag_results is empty (weak context), prints answer only — no sections.
-    """
+    """Print structured RAG output: answer + per-file grouped Sources/Quotes."""
     from rag.retriever import extract_quote
 
     print(answer, end="")
@@ -214,46 +212,47 @@ def _print_rag_answer(answer: str, rag_results: list, rag_metadata: dict) -> Non
     if not rag_results:
         return
 
-    # Sources — deduplicated by (filename, section), ordered by score desc
-    print()
-    print("Sources:")
-    seen_sources: set[tuple] = set()
-    ordered: list[dict] = sorted(rag_results, key=lambda r: r.get("score", 0.0), reverse=True)
-    for r in ordered:
-        key = (r.get("filename", r.get("source", "?")), r.get("section", ""))
-        if key in seen_sources:
-            continue
-        seen_sources.add(key)
-        fname = r.get("filename", r.get("source", "?"))
-        section = r.get("section") or ""
-        chunk_id = r.get("id", "")
-        parts = [fname]
-        if section:
-            parts.append(section)
-        if chunk_id:
-            parts.append(chunk_id)
-        print(f"  - {' | '.join(parts)}")
+    # Sort all results by score desc
+    ordered = sorted(rag_results, key=lambda r: r.get("score", 0.0), reverse=True)
 
-    # Quotes — one per unique chunk, grouped by filename
-    print()
-    printed_ids: set[str] = set()
+    # Group by filename, preserving best-score order
+    groups: dict[str, list[dict]] = {}
     for r in ordered:
-        chunk_id = r.get("id", "")
-        if chunk_id in printed_ids:
-            continue
-        printed_ids.add(chunk_id)
         fname = r.get("filename", r.get("source", "?"))
-        section = r.get("section") or ""
-        label_parts = [fname]
-        if section:
-            label_parts.append(section)
-        if chunk_id:
-            label_parts.append(chunk_id)
-        label = " | ".join(label_parts)
-        quote = extract_quote(r.get("text", ""))
-        print(f'Quotes ({label}):')
-        print(f'  "{quote}"')
-        print()
+        groups.setdefault(fname, []).append(r)
+
+    print()
+    first = True
+    for fname, chunks in groups.items():
+        if not first:
+            print()
+        first = False
+
+        # Deduplicate chunk ids (preserve order)
+        seen_ids: set[str] = set()
+        unique_chunks: list[dict] = []
+        for c in chunks:
+            cid = c.get("id", "")
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                unique_chunks.append(c)
+
+        print(f"Источник: {fname}")
+        first_quote = True
+        for c in unique_chunks:
+            q = extract_quote(c.get("text", ""))
+            raw_id = c.get("id", "")
+            short_id = raw_id.split("#", 1)[1] if "#" in raw_id else raw_id
+            section = c.get("section") or ""
+            suffix = f"({section}, #{short_id})" if section else f"(#{short_id})"
+            if q:
+                if first_quote:
+                    print(f'Цитата: "{q}" {suffix}')
+                    first_quote = False
+                else:
+                    print(f'"{q}" {suffix}')
+            else:
+                print(f'{c.get("text", "").strip()} {suffix}')
 
 
 def _execute_pipeline(pipeline: list[dict], job_id: str, orch):
@@ -296,9 +295,11 @@ def _start_reminder_poller(job_id: str, delay_seconds: int, orch):
     t.start()
 
 
-def _run_indexing(chunker: str) -> None:
-    """Build and persist the RAG index for the given chunker strategy."""
-    from pathlib import Path as _Path
+_rag_corpus_path: Path | None = None
+
+
+def _run_indexing(chunker: str, corpus_path: Path) -> None:
+    """Build and persist the RAG index for the given chunker strategy and corpus path."""
     try:
         from rag.indexer import build_index
         from rag.retriever import _DEFAULT_INDEX_DIR, _cache
@@ -306,9 +307,8 @@ def _run_indexing(chunker: str) -> None:
         print(f"[ERROR] RAG deps missing: {e}. Run: pip install faiss-cpu numpy")
         return
 
-    corpus_path = _Path(__file__).parent / "docs"
     if not corpus_path.exists():
-        print(f"[ERROR] docs/ directory not found: {corpus_path}", file=sys.stderr)
+        print(f"[ERROR] directory not found: {corpus_path}", file=sys.stderr)
         return
 
     print(f"Индексирую корпус (стратегия: {chunker})...")
@@ -797,12 +797,19 @@ def main():
                     print("  /tool list <сервер>     — инструменты сервера")
                 continue
             if text.startswith("/index"):
+                global _rag_corpus_path
                 parts = text.split()
-                _chunker = parts[1] if len(parts) > 1 else "fixed"
+                if len(parts) < 2:
+                    print("Использование: /index <путь> [fixed|structured]")
+                    continue
+                _p = Path(parts[1])
+                _corpus = _p if _p.is_absolute() else Path.cwd() / _p
+                _chunker = parts[2] if len(parts) > 2 else "fixed"
                 if _chunker not in ("fixed", "structured"):
-                    print("Использование: /index [fixed|structured]")
+                    print("Использование: /index <путь> [fixed|structured]")
                 else:
-                    _run_indexing(_chunker)
+                    _rag_corpus_path = _corpus
+                    _run_indexing(_chunker, _corpus)
                 continue
             if text.startswith("/rag"):
                 parts = text.split(maxsplit=2)
@@ -843,10 +850,12 @@ def main():
                 elif sub == "":
                     idx_str = "индекс найден" if rag_available() else "индекс отсутствует"
                     kw = "on" if orchestrator.rag_use_keyword_filter else "off"
+                    corpus_str = str(_rag_corpus_path) if _rag_corpus_path else "не задан"
                     print(
                         f"RAG: режим={orchestrator.rag_mode}, "
                         f"threshold={orchestrator.rag_similarity_threshold}, "
-                        f"keyword={kw}, min_results={orchestrator.rag_min_results} "
+                        f"keyword={kw}, min_results={orchestrator.rag_min_results}, "
+                        f"corpus={corpus_str} "
                         f"({idx_str})"
                     )
                 else:

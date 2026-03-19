@@ -1,24 +1,40 @@
 """Build and persist FAISS indexes from a markdown corpus."""
 from __future__ import annotations
 
+import html as _html
 import json
 import re
 import time
 from pathlib import Path
 
+import mistune as _mistune
 import numpy as np
 import faiss
 
 from rag.chunkers import FixedSizeChunker, StructuredChunker, chunker_metrics, Chunk
 from rag.embedder import Embedder
 
+_md = _mistune.create_markdown()  # module-level singleton
+
+
+def _md_to_plain(text: str) -> str:
+    """Convert markdown to plain text via HTML intermediate."""
+    raw_html = _md(text)
+    plain = re.sub(r"<[^>]+>", " ", raw_html)
+    return _html.unescape(plain)
+
+
+def _strip_frontmatter(text: str) -> str:
+    """Strip only YAML front-matter, preserving markdown structure."""
+    return re.sub(r"^---\n.*?\n---\n", "", text, flags=re.DOTALL).strip()
+
 
 def _clean(text: str) -> str:
-    """Strip YAML front-matter, HTML tags, and normalize whitespace."""
+    """Strip YAML front-matter, markdown, and normalize whitespace."""
     # Strip YAML front-matter
     text = re.sub(r"^---\n.*?\n---\n", "", text, flags=re.DOTALL)
-    # Strip HTML tags
-    text = re.sub(r"<[^>]+>", "", text)
+    # Convert markdown to plain text
+    text = _md_to_plain(text)
     # Normalize whitespace (preserve paragraph breaks)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -47,18 +63,24 @@ def build_index(
         raise ValueError(f"Unknown chunker: {chunker!r}")
 
     # Walk corpus
+    use_structured = isinstance(ch, StructuredChunker)
     all_chunks: list[Chunk] = []
     for md_file in sorted(corpus_dir.glob("**/*.md")):
         try:
             text = md_file.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        text = _clean(text)
+        text = _strip_frontmatter(text) if use_structured else _clean(text)
         if not text.strip():
             continue
         rel = str(md_file.relative_to(corpus_dir))
         fname = md_file.name
-        all_chunks.extend(ch.chunk(text, rel, fname))
+        chunks = ch.chunk(text, rel, fname)
+        if use_structured:
+            for c in chunks:
+                c.text = _md_to_plain(c.text).strip()
+            chunks = [c for c in chunks if c.text]
+        all_chunks.extend(chunks)
 
     for txt_file in sorted(corpus_dir.glob("**/*.txt")):
         try:

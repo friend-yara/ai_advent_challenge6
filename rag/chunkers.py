@@ -60,7 +60,7 @@ class FixedSizeChunker:
 class StructuredChunker:
     """Splits text on Markdown headings; further splits large sections at paragraphs."""
 
-    def __init__(self, max_section_chars: int = 1200):
+    def __init__(self, max_section_chars: int = 500):
         self.max_section_chars = max_section_chars
 
     def chunk(self, text: str, source: str, filename: str) -> list[Chunk]:
