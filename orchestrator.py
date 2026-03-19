@@ -114,6 +114,7 @@ class Orchestrator:
         self.rag_min_results: int = 1    # минимум чанков для "strong context"
         self.last_rag_results: list = []
         self.last_rag_metadata: dict = {}
+        self.last_rag_lang_warn: str | None = None
 
     @property
     def rag_enabled(self) -> bool:
@@ -148,13 +149,13 @@ class Orchestrator:
         (reply_text, metrics_dict)
         metrics includes: model, time, in, out, cost, agent, pre_violations
         """
+        self.last_rag_lang_warn = None
         if self.rag_enabled:
             lang = self._detect_lang(user_text)
             if lang and lang != self.rag_index_lang:
-                print(
-                    f"[RAG WARN] Язык запроса '{lang}' отличается от языка индекса '{self.rag_index_lang}'. "
-                    f"Качество поиска может быть низким.",
-                    file=sys.stderr,
+                self.last_rag_lang_warn = (
+                    f"[RAG WARN] Язык запроса '{lang}' отличается от языка индекса"
+                    f" '{self.rag_index_lang}'. Качество поиска может быть низким."
                 )
 
         ag = self.agent

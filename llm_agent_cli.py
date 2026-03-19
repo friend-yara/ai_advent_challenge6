@@ -901,6 +901,9 @@ def main():
                     print(answer, end="")
                 print_metrics(metrics)
 
+            if _has_rag_results and orchestrator.last_rag_lang_warn:
+                print(orchestrator.last_rag_lang_warn, file=sys.stderr)
+
             # Start reminder poller if a reminder tool was called
             for tr in metrics.get("tool_results", []):
                 _tname = tr.get("tool_name", "")
