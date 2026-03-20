@@ -115,6 +115,7 @@ class Orchestrator:
         self.last_rag_results: list = []
         self.last_rag_metadata: dict = {}
         self.last_rag_lang_warn: str | None = None
+        self.rag_task_memory: dict = {"goal": "", "key_terms": [], "turn_count": 0}
 
     @property
     def rag_enabled(self) -> bool:
@@ -191,7 +192,17 @@ class Orchestrator:
 
         # RAG pre-search: always search before LLM call, inject results into prompt
         if self.rag_enabled:
-            rag_text, _, rag_data = self._execute_document_search({"query": user_text})
+            augmented_query = self._build_rag_query(user_text)
+            rag_text, _, rag_data = self._execute_document_search({"query": augmented_query})
+            # Inject task memory context before RAG results
+            tm = self.rag_task_memory
+            if tm["goal"]:
+                task_ctx = (
+                    f"\n\nRAG_CONTEXT:\n"
+                    f"Research goal: {tm['goal']}\n"
+                    f"Key terms: {', '.join(tm['key_terms'])}"
+                )
+                prompt += task_ctx
             prompt += "\n\n" + rag_text
             # Remove tool from list — search already executed by the system
             tools_for_llm = [t for t in tools_for_llm if t["name"] != "document_search"]
@@ -292,6 +303,10 @@ class Orchestrator:
             text = f"{text} {tag}"
 
         stm.messages.append({"role": "assistant", "text": text})
+
+        # Update RAG task memory after each RAG turn
+        if self.rag_enabled:
+            self._update_rag_task_memory(user_text, text)
 
         usage = data.get("usage", {}) if isinstance(data, dict) else {}
         in_tok = usage.get("input_tokens")
@@ -566,6 +581,60 @@ class Orchestrator:
             return rewritten if rewritten else query
         except Exception:
             return query
+
+    def _build_rag_query(self, user_text: str) -> str:
+        """Augment user query with accumulated key_terms from task memory."""
+        terms = self.rag_task_memory.get("key_terms", [])
+        if not terms:
+            return user_text
+        terms_str = " ".join(terms)
+        return f"{user_text} {terms_str}"
+
+    def _update_rag_task_memory(self, user_text: str, assistant_text: str) -> None:
+        """Extract goal + key terms from latest turn via LLM mini-call.
+
+        Merges new terms with existing (deduplicated, capped at 15).
+        On any exception silently falls back (no crash).
+        """
+        current = self.rag_task_memory
+        prompt = (
+            "You are a research assistant tracker. Given the conversation turn below "
+            "and the current research state, extract:\n"
+            "1) The user's research goal (one sentence)\n"
+            "2) New key terms/entities from this turn\n\n"
+            f"Current goal: {current['goal'] or '(none yet)'}\n"
+            f"Current terms: {', '.join(current['key_terms']) or '(none)'}\n\n"
+            f"User: {user_text}\n"
+            f"Assistant: {assistant_text[:500]}\n\n"
+            "Output exactly two lines:\n"
+            "goal: <one sentence>\n"
+            "terms: <comma-separated new terms only>"
+        )
+        payload: dict = {
+            "model": "gpt-4.1-mini",
+            "input": prompt,
+            "max_output_tokens": 80,
+            "temperature": 0.0,
+        }
+        try:
+            data, _ = self.agent._post(payload)
+            reply = _extract_text(data).strip()
+            for line in reply.splitlines():
+                low = line.strip().lower()
+                if low.startswith("goal:"):
+                    current["goal"] = line.strip()[5:].strip()
+                elif low.startswith("terms:"):
+                    raw = line.strip()[6:].strip()
+                    new_terms = [t.strip() for t in raw.split(",") if t.strip()]
+                    existing = set(t.lower() for t in current["key_terms"])
+                    for t in new_terms:
+                        if t.lower() not in existing:
+                            current["key_terms"].append(t)
+                            existing.add(t.lower())
+                    current["key_terms"] = current["key_terms"][:15]
+            current["turn_count"] += 1
+        except Exception:
+            current["turn_count"] += 1
 
     def _execute_document_search(self, arguments: dict) -> tuple[str, str, dict]:
         """

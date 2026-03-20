@@ -165,10 +165,12 @@ Commands:
   /tool list               List all configured MCP servers
   /tool list <server>      Connect to MCP server and show available tools
   /index <путь> [fixed|structured]  Перестроить RAG-индекс по указанному пути
-  /rag                     Show RAG status (mode, threshold, keyword, corpus)
-  /rag base|filter|off     Switch RAG mode
+  /rag                     Show RAG status (mode, threshold, keyword, memory, corpus)
+  /rag base|filter|off     Switch RAG mode (resets task memory)
   /rag threshold <float>   Set similarity threshold (default 0.45)
   /rag keyword on|off      Enable/disable keyword filter (default off)
+  /rag memory              Show task memory (goal, terms, turn count)
+  /rag memory reset        Clear task memory
 
 Prompt format: [STATE:agent] >
   Example: [PLAN:planner] > or [EXEC:coder] >
@@ -819,9 +821,11 @@ def main():
                         print("ERROR: RAG-индекс не найден. Запустите /index.")
                     else:
                         orchestrator.rag_mode = sub
-                        print(f"OK: RAG режим = {sub}")
+                        orchestrator.rag_task_memory = {"goal": "", "key_terms": [], "turn_count": 0}
+                        print(f"OK: RAG режим = {sub} (task memory reset)")
                 elif sub == "off":
                     orchestrator.rag_mode = "off"
+                    orchestrator.rag_task_memory = {"goal": "", "key_terms": [], "turn_count": 0}
                     print("OK: RAG выключен")
                 elif sub == "threshold":
                     val = parts[2].strip() if len(parts) > 2 else ""
@@ -840,6 +844,17 @@ def main():
                         print("OK: RAG keyword-фильтр выключен")
                     else:
                         print("Использование: /rag keyword on|off")
+                elif sub == "memory":
+                    val = parts[2].strip().lower() if len(parts) > 2 else ""
+                    if val == "reset":
+                        orchestrator.rag_task_memory = {"goal": "", "key_terms": [], "turn_count": 0}
+                        print("OK: RAG task memory reset")
+                    else:
+                        tm = orchestrator.rag_task_memory
+                        print(f"RAG Task Memory (turns: {tm['turn_count']}):")
+                        print(f"  Goal:  {tm['goal'] or '(none)'}")
+                        print(f"  Terms: {', '.join(tm['key_terms']) or '(none)'}")
+                    continue
                 elif sub == "min":
                     val = parts[2].strip() if len(parts) > 2 else ""
                     try:
@@ -851,15 +866,18 @@ def main():
                     idx_str = "индекс найден" if rag_available() else "индекс отсутствует"
                     kw = "on" if orchestrator.rag_use_keyword_filter else "off"
                     corpus_str = str(_rag_corpus_path) if _rag_corpus_path else "не задан"
+                    tm = orchestrator.rag_task_memory
+                    mem_str = f"turns={tm['turn_count']}, terms={len(tm['key_terms'])}"
                     print(
                         f"RAG: режим={orchestrator.rag_mode}, "
                         f"threshold={orchestrator.rag_similarity_threshold}, "
                         f"keyword={kw}, min_results={orchestrator.rag_min_results}, "
+                        f"memory=[{mem_str}], "
                         f"corpus={corpus_str} "
                         f"({idx_str})"
                     )
                 else:
-                    print("Использование: /rag | /rag base|filter|off | /rag threshold <float> | /rag keyword on|off | /rag min <int>")
+                    print("Использование: /rag | /rag base|filter|off | /rag threshold <float> | /rag keyword on|off | /rag min <int> | /rag memory [reset]")
                 continue
             print("Unknown command")
             continue
