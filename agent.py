@@ -25,8 +25,7 @@ except ImportError as e:
         "  python3 -m pip install --user toons"
     ) from e
 
-
-URL = "https://api.openai.com/v1/responses"
+from providers import OpenAIProvider
 
 
 def load_pricing_models(script_dir: Optional[Path] = None) -> dict:
@@ -470,9 +469,11 @@ class Agent:
         context_strategy: str = "window",
         context_summary: bool = False,
         ltm: "LongTermMemory | None" = None,
+        provider=None,
     ):
         """Initialize agent."""
         self.api_key = api_key
+        self.provider = provider or OpenAIProvider(api_key)
         self.model = model
         self.system_prompt = system_prompt
         self.history_limit = max(0, history_limit)
@@ -830,26 +831,5 @@ class Agent:
     # ---------------- API call ----------------
 
     def _post(self, payload: dict):
-        """Send request to OpenAI Responses API with retry on timeout."""
-        retries = 3
-        delay = 2
-        start = time.monotonic()
-        for i in range(retries):
-            try:
-                r = requests.post(
-                    URL,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=self.timeout,
-                )
-                elapsed = time.monotonic() - start
-                return r.json(), elapsed
-            except requests.exceptions.ReadTimeout:
-                if i == retries - 1:
-                    raise
-                time.sleep(delay)
-                delay *= 2
-        return {}, 0.0
+        """Send request to the configured LLM provider."""
+        return self.provider.post(payload, self.timeout)

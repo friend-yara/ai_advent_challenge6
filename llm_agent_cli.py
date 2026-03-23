@@ -32,6 +32,7 @@ from agents import AgentRegistry
 from context_builder import ContextBuilder
 from mcp_client import MCPClient
 from orchestrator import Orchestrator, rag_available
+from providers import OpenAIProvider, OllamaProvider
 
 # Optional multiline input (prompt_toolkit)
 try:
@@ -99,6 +100,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Read REPL input from file instead of terminal")
     p.add_argument("--interactive-batch", default=None,
                    help="Like --batch-file but prompts for follow-up after each answer")
+
+    # LLM provider selection
+    p.add_argument("--provider", default="openai", choices=["openai", "ollama"],
+                   help="LLM provider: openai (default) or ollama")
+    p.add_argument("--ollama-url", default="http://localhost:11434",
+                   help="Ollama server URL (default: http://localhost:11434)")
+    p.add_argument("--ollama-model", default="qwen3.5:9b",
+                   help="Default Ollama model (default: qwen3.5:9b)")
 
     return p
 
@@ -171,6 +180,9 @@ Commands:
   /rag keyword on|off      Enable/disable keyword filter (default off)
   /rag memory              Show task memory (goal, terms, turn count)
   /rag memory reset        Clear task memory
+  /provider                Show current LLM provider
+  /provider openai         Switch to OpenAI
+  /provider ollama [url]   Switch to Ollama (default: localhost:11434)
 
 Prompt format: [STATE:agent] >
   Example: [PLAN:planner] > or [EXEC:coder] >
@@ -192,8 +204,11 @@ Invariant checks:
 
 
 def print_metrics(m: dict):
-    """Print turn metrics: token counts and cost only."""
-    print(f" (in={m['in']}, out={m['out']}, cost={m['cost']})\n")
+    """Print turn metrics: provider/model, token counts, and cost."""
+    provider = m.get("provider", "openai")
+    model = m.get("model", "?")
+    cost = "free" if provider != "openai" else m.get("cost", "unknown")
+    print(f" ({provider}/{model}, in={m['in']}, out={m['out']}, cost={cost})\n")
 
 
 def _print_cli(msg: str) -> None:
@@ -334,9 +349,18 @@ def main():
     """Run REPL."""
     args = resolve_profile_paths(build_parser().parse_args())
 
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key and args.provider == "openai":
         sys.exit("ERROR: OPENAI_API_KEY not set")
+
+    # Instantiate LLM provider
+    if args.provider == "ollama":
+        provider = OllamaProvider(
+            base_url=args.ollama_url,
+            default_model=args.ollama_model,
+        )
+    else:
+        provider = OpenAIProvider(api_key=api_key)
 
     pricing = load_pricing_models()
 
@@ -368,6 +392,7 @@ def main():
         print_json=args.json,
         context_summary=args.context_summary,
         ltm=ltm,
+        provider=provider,
     )
 
     # Build agent registry + orchestrator
@@ -378,8 +403,13 @@ def main():
     mcp.load()
 
     orchestrator = Orchestrator(agent, registry, ContextBuilder(), pricing, mcp=mcp)
-    orchestrator.rag_mode = "filter" if rag_available() else "off"
+    # RAG off for local models — query rewriting + large context too slow
+    if provider.name == "ollama":
+        orchestrator.rag_mode = "off"
+    else:
+        orchestrator.rag_mode = "filter" if rag_available() else "off"
 
+    print(f"Provider:      {agent.provider.summary()}")
     print(f"Agents loaded: {registry.summary()}")
     print(f"MCP servers:   {mcp.summary()}")
     print(f"MCP tools:     {mcp.tools_summary()}")
@@ -687,6 +717,7 @@ def main():
                 print(f"[ltm]     {agent.ltm.summary_line()}{checker_info}")
                 print(f"[orch]    agents={registry.summary()}, "
                       f"active={orchestrator.current_agent_name()}")
+                print(f"[provider] {agent.provider.summary()}")
                 print(f"[mcp]     {mcp.summary()}")
                 rag_idx = "index=ok" if rag_available() else "index=missing"
                 print(f"[rag]     mode={orchestrator.rag_mode}, {rag_idx}")
@@ -878,6 +909,27 @@ def main():
                     )
                 else:
                     print("Использование: /rag | /rag base|filter|off | /rag threshold <float> | /rag keyword on|off | /rag min <int> | /rag memory [reset]")
+                continue
+            if text.startswith("/provider"):
+                parts = text.split(maxsplit=2)
+                sub = parts[1].strip().lower() if len(parts) > 1 else ""
+                if sub == "":
+                    print(f"Provider: {agent.provider.summary()}")
+                elif sub == "openai":
+                    if not api_key:
+                        print("ERROR: OPENAI_API_KEY not set")
+                    else:
+                        agent.provider = OpenAIProvider(api_key=api_key)
+                        print(f"OK: provider = {agent.provider.summary()}")
+                elif sub == "ollama":
+                    url = parts[2].strip() if len(parts) > 2 else args.ollama_url
+                    agent.provider = OllamaProvider(
+                        base_url=url,
+                        default_model=args.ollama_model,
+                    )
+                    print(f"OK: provider = {agent.provider.summary()}")
+                else:
+                    print("Использование: /provider | /provider openai | /provider ollama [url]")
                 continue
             print("Unknown command")
             continue

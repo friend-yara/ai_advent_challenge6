@@ -187,8 +187,11 @@ class Orchestrator:
         # Build tools list for LLM (planner only, if MCP is available)
         tools_for_llm = self._build_tools_list(spec)
 
-        # Build context prompt
-        prompt = self.ctx.build(spec, user_text, tc, stm, ltm, ag.facts)
+        # Build context prompt (skip heavy context for local providers)
+        if ag.provider.name == "ollama":
+            prompt = user_text
+        else:
+            prompt = self.ctx.build(spec, user_text, tc, stm, ltm, ag.facts)
 
         # RAG pre-search: always search before LLM call, inject results into prompt
         if self.rag_enabled:
@@ -215,6 +218,10 @@ class Orchestrator:
             payload["max_output_tokens"] = ag.max_output_tokens
         if ag.stop:
             payload["stop"] = ag.stop
+        # Strip tools for providers that don't support them
+        if not ag.provider.supports_tools:
+            tools_for_llm = []
+
         if tools_for_llm:
             payload["tools"] = tools_for_llm
 
@@ -288,14 +295,18 @@ class Orchestrator:
         else:
             text = _extract_text(data)
 
-        # Post-check invariants
+        # Post-check invariants (skip retry for slow local providers)
         if ltm.invariants and ltm.checker.rules:
             post_passed, post_violations = ltm.checker.check(text)
             if not post_passed:
                 if tc.state == "PLANNING":
                     text = _planning_violation_message(post_violations)
-                else:
+                elif ag.provider.name != "ollama":
                     text = self._retry_with_violations(text, post_violations, spec)
+                else:
+                    vlist = "\n".join(f"  - {v}" for v in post_violations)
+                    print(f"[WARN] Инварианты нарушены (retry пропущен для Ollama):\n{vlist}",
+                          file=sys.stderr)
 
         # Append tool tag(s) if MCP tools were used (tool name, not server name)
         if tools_used:
@@ -311,10 +322,12 @@ class Orchestrator:
         usage = data.get("usage", {}) if isinstance(data, dict) else {}
         in_tok = usage.get("input_tokens")
         out_tok = usage.get("output_tokens")
-        _, _, total_cost = _compute_cost(self.pricing, spec.model, in_tok, out_tok)
+        actual_model = ag.provider.resolve_model(spec.model)
+        _, _, total_cost = _compute_cost(self.pricing, actual_model, in_tok, out_tok)
 
         metrics = {
-            "model": spec.model,
+            "provider": ag.provider.name,
+            "model": actual_model,
             "agent": spec.name,
             "time": elapsed,
             "in": in_tok,
@@ -338,7 +351,7 @@ class Orchestrator:
         ltm = ag.ltm
 
         if tc.step >= tc.total:
-            return "Все шаги уже выполнены.", _zero_metrics(ag.model)
+            return "Все шаги уже выполнены.", _zero_metrics(ag.model, ag.provider.name)
 
         current_step = tc.plan[tc.step]
         step_prompt = (
@@ -378,10 +391,12 @@ class Orchestrator:
         usage = data.get("usage", {}) if isinstance(data, dict) else {}
         in_tok = usage.get("input_tokens")
         out_tok = usage.get("output_tokens")
-        _, _, total_cost = _compute_cost(self.pricing, spec.model, in_tok, out_tok)
+        actual_model = ag.provider.resolve_model(spec.model)
+        _, _, total_cost = _compute_cost(self.pricing, actual_model, in_tok, out_tok)
 
         metrics = {
-            "model": spec.model,
+            "provider": ag.provider.name,
+            "model": actual_model,
             "agent": spec.name,
             "time": elapsed,
             "in": in_tok,
@@ -895,9 +910,10 @@ def _compute_cost(pricing: dict, model: str, in_tok, out_tok):
     return compute_cost(pricing, model, in_tok, out_tok)
 
 
-def _zero_metrics(model: str) -> dict:
+def _zero_metrics(model: str, provider: str = "openai") -> dict:
     """Return empty metrics dict."""
     return {
+        "provider": provider,
         "model": model,
         "agent": "none",
         "time": 0.0,
