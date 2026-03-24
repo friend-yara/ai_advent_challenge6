@@ -70,12 +70,16 @@ class OllamaProvider:
     """Ollama provider via native /api/chat endpoint."""
 
     def __init__(self, base_url: str = "http://localhost:11434",
-                 default_model: str = "qwen3.5:9b"):
+                 default_model: str = "qwen3.5:9b",
+                 num_threads: int | None = None,
+                 num_predict: int | None = None):
         """Initialize with Ollama server URL and default model."""
         self.name = "ollama"
         self.supports_tools = False
         self.base_url = base_url.rstrip("/")
         self.default_model = default_model
+        self.num_threads = num_threads
+        self.num_predict = num_predict
 
     def _map_model(self, model: str) -> str:
         """Map model name: names with ':' pass through, others use default."""
@@ -109,10 +113,14 @@ class OllamaProvider:
         options: dict = {}
         if payload.get("temperature") is not None:
             options["temperature"] = payload["temperature"]
-        if payload.get("max_output_tokens") is not None:
+        if self.num_predict is not None:
+            options["num_predict"] = self.num_predict
+        elif payload.get("max_output_tokens") is not None:
             options["num_predict"] = payload["max_output_tokens"]
         else:
             options["num_predict"] = 1024
+        if self.num_threads is not None:
+            options["num_thread"] = self.num_threads
         if payload.get("stop"):
             ollama_payload["stop"] = payload["stop"]
         if options:
@@ -178,7 +186,13 @@ class OllamaProvider:
                     data = chunk
                     break
             elapsed = time.monotonic() - start
-            print(f" {elapsed:.1f}s", file=sys.stderr, flush=True)
+            eval_count = data.get("eval_count", 0)
+            eval_duration = data.get("eval_duration", 0)
+            if eval_count and eval_duration:
+                tok_per_sec = eval_count / (eval_duration / 1e9)
+                print(f" {elapsed:.1f}s, {tok_per_sec:.1f} tok/s", file=sys.stderr, flush=True)
+            else:
+                print(f" {elapsed:.1f}s", file=sys.stderr, flush=True)
         except requests.exceptions.ConnectionError:
             print(" ошибка", file=sys.stderr, flush=True)
             raise RuntimeError(
@@ -205,4 +219,10 @@ class OllamaProvider:
 
     def summary(self) -> str:
         """One-line status for /provider and /show."""
-        return f"ollama ({self.base_url}, model={self.default_model})"
+        parts = [f"ollama {self.default_model}"]
+        np = self.num_predict if self.num_predict is not None else 1024
+        parts.append(f"predict={np}")
+        if self.num_threads is not None:
+            parts.append(f"threads={self.num_threads}")
+        parts.append(self.base_url)
+        return " | ".join(parts)

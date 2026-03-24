@@ -108,6 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Ollama server URL (default: http://localhost:11434)")
     p.add_argument("--ollama-model", default="qwen3.5:9b",
                    help="Default Ollama model (default: qwen3.5:9b)")
+    p.add_argument("--ollama-threads", type=int, default=None,
+                   help="Number of threads for Ollama inference (default: Ollama decides)")
+    p.add_argument("--ollama-num-predict", type=int, default=None,
+                   help="Max tokens for Ollama (overrides --max-output-tokens)")
 
     return p
 
@@ -358,6 +362,8 @@ def main():
         provider = OllamaProvider(
             base_url=args.ollama_url,
             default_model=args.ollama_model,
+            num_threads=args.ollama_threads,
+            num_predict=args.ollama_num_predict,
         )
     else:
         provider = OpenAIProvider(api_key=api_key)
@@ -926,6 +932,8 @@ def main():
                     agent.provider = OllamaProvider(
                         base_url=url,
                         default_model=args.ollama_model,
+                        num_threads=args.ollama_threads,
+                        num_predict=args.ollama_num_predict,
                     )
                     print(f"OK: provider = {agent.provider.summary()}")
                 else:
