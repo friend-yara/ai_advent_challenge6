@@ -187,6 +187,8 @@ Commands:
   /provider                Show current LLM provider
   /provider openai         Switch to OpenAI
   /provider ollama [url]   Switch to Ollama (default: localhost:11434)
+  /model                   Show current model + available Ollama models
+  /model <name>            Switch Ollama default model (checks availability)
 
 Prompt format: [STATE:agent] >
   Example: [PLAN:planner] > or [EXEC:coder] >
@@ -915,6 +917,38 @@ def main():
                     )
                 else:
                     print("Использование: /rag | /rag base|filter|off | /rag threshold <float> | /rag keyword on|off | /rag min <int> | /rag memory [reset]")
+                continue
+            if text.startswith("/model"):
+                parts = text.split(maxsplit=1)
+                name = parts[1].strip() if len(parts) > 1 else ""
+                prov = agent.provider
+                if name == "":
+                    if prov.name == "ollama":
+                        available = prov.list_models()
+                        print(f"Текущая модель: {prov.default_model}")
+                        if available:
+                            print("Доступные модели:")
+                            for m in available:
+                                marker = " *" if m == prov.default_model else ""
+                                print(f"  {m}{marker}")
+                        else:
+                            print("Не удалось получить список моделей от Ollama")
+                    else:
+                        print(f"Модель задаётся агентами (provider: {prov.name})")
+                else:
+                    if prov.name != "ollama":
+                        print("Переключение модели доступно только для провайдера ollama")
+                    else:
+                        available = prov.list_models()
+                        if not available:
+                            print("Не удалось получить список моделей от Ollama")
+                        elif name in available:
+                            prov.default_model = name
+                            print(f"OK: модель = {name}")
+                        else:
+                            print(f"Модель '{name}' не найдена. Доступные:")
+                            for m in available:
+                                print(f"  {m}")
                 continue
             if text.startswith("/provider"):
                 parts = text.split(maxsplit=2)

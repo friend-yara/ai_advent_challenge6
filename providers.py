@@ -213,6 +213,15 @@ class OllamaProvider:
 
         return self._normalize_response(data), elapsed
 
+    def list_models(self) -> list[str]:
+        """Fetch available model names from Ollama /api/tags."""
+        try:
+            r = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            data = r.json()
+            return [m["name"] for m in data.get("models", [])]
+        except Exception:
+            return []
+
     def resolve_model(self, model: str) -> str:
         """Return the model name that will actually be used."""
         return self._map_model(model)
