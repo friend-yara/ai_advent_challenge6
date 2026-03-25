@@ -195,18 +195,30 @@ class Orchestrator:
 
         # RAG pre-search: always search before LLM call, inject results into prompt
         if self.rag_enabled:
-            augmented_query = self._build_rag_query(user_text)
-            rag_text, _, rag_data = self._execute_document_search({"query": augmented_query})
-            # Inject task memory context before RAG results
-            tm = self.rag_task_memory
-            if tm["goal"]:
-                task_ctx = (
-                    f"\n\nRAG_CONTEXT:\n"
-                    f"Research goal: {tm['goal']}\n"
-                    f"Key terms: {', '.join(tm['key_terms'])}"
+            is_local = ag.provider.name == "ollama"
+            rag_query = user_text if is_local else self._build_rag_query(user_text)
+            rag_top_k = 3 if is_local else 5
+            rag_text, _, rag_data = self._execute_document_search(
+                {"query": rag_query, "top_k": rag_top_k}
+            )
+            if is_local:
+                # Compact prompt: grounding instruction + context + question
+                prompt = (
+                    "Answer ONLY from the documents below. "
+                    "If the documents don't contain enough information, say so.\n\n"
+                    + rag_text + "\n\nQuestion: " + user_text
                 )
-                prompt += task_ctx
-            prompt += "\n\n" + rag_text
+            else:
+                # OpenAI path: inject task memory + RAG into built context
+                tm = self.rag_task_memory
+                if tm["goal"]:
+                    task_ctx = (
+                        f"\n\nRAG_CONTEXT:\n"
+                        f"Research goal: {tm['goal']}\n"
+                        f"Key terms: {', '.join(tm['key_terms'])}"
+                    )
+                    prompt += task_ctx
+                prompt += "\n\n" + rag_text
             # Remove tool from list — search already executed by the system
             tools_for_llm = [t for t in tools_for_llm if t["name"] != "document_search"]
 
@@ -315,8 +327,8 @@ class Orchestrator:
 
         stm.messages.append({"role": "assistant", "text": text})
 
-        # Update RAG task memory after each RAG turn
-        if self.rag_enabled:
+        # Update RAG task memory after each RAG turn (skip for Ollama — requires OpenAI)
+        if self.rag_enabled and ag.provider.name != "ollama":
             self._update_rag_task_memory(user_text, text)
 
         usage = data.get("usage", {}) if isinstance(data, dict) else {}

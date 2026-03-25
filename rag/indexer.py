@@ -12,7 +12,7 @@ import numpy as np
 import faiss
 
 from rag.chunkers import FixedSizeChunker, StructuredChunker, chunker_metrics, Chunk
-from rag.embedder import Embedder
+from rag.embedder import get_embedder
 
 _md = _mistune.create_markdown()  # module-level singleton
 
@@ -52,6 +52,9 @@ def build_index(
     corpus_dir: Path,
     chunker: str,
     index_dir: Path,
+    embedder_name: str = "openai",
+    embed_model: str | None = None,
+    ollama_url: str | None = None,
 ) -> dict:
     """Build FAISS index from corpus and persist to disk. Returns metrics."""
     # Select chunker
@@ -98,7 +101,13 @@ def build_index(
         raise RuntimeError(f"No chunks produced from {corpus_dir}")
 
     # Embed
-    embedder = Embedder()
+    emb_kwargs: dict = {}
+    if embedder_name == "ollama":
+        if embed_model:
+            emb_kwargs["model"] = embed_model
+        if ollama_url:
+            emb_kwargs["base_url"] = ollama_url
+    embedder = get_embedder(embedder_name, **emb_kwargs)
     texts = [c.text for c in all_chunks]
     t0 = time.time()
     vectors = embedder.embed(texts)
@@ -140,6 +149,9 @@ def build_index(
         except Exception:
             pass
     config["active"] = chunker
+    config["embedder"] = embedder_name
+    if embed_model:
+        config["embed_model"] = embed_model
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
     metrics = chunker_metrics(all_chunks)

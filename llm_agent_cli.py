@@ -321,7 +321,10 @@ def _start_reminder_poller(job_id: str, delay_seconds: int, orch):
 _rag_corpus_path: Path | None = None
 
 
-def _run_indexing(chunker: str, corpus_path: Path) -> None:
+def _run_indexing(chunker: str, corpus_path: Path,
+                  embedder_name: str = "openai",
+                  embed_model: str | None = None,
+                  ollama_url: str | None = None) -> None:
     """Build and persist the RAG index for the given chunker strategy and corpus path."""
     try:
         from rag.indexer import build_index
@@ -334,9 +337,15 @@ def _run_indexing(chunker: str, corpus_path: Path) -> None:
         print(f"[ERROR] directory not found: {corpus_path}", file=sys.stderr)
         return
 
-    print(f"Индексирую корпус (стратегия: {chunker})...")
+    emb_label = f"{embedder_name}" + (f" ({embed_model})" if embed_model else "")
+    print(f"Индексирую корпус (стратегия: {chunker}, embedder: {emb_label})...")
     try:
-        metrics = build_index(corpus_path, chunker, _DEFAULT_INDEX_DIR)
+        metrics = build_index(
+            corpus_path, chunker, _DEFAULT_INDEX_DIR,
+            embedder_name=embedder_name,
+            embed_model=embed_model,
+            ollama_url=ollama_url,
+        )
         # Invalidate in-memory cache so next search reloads from disk
         _cache.clear()
         print(f"  Чанков: {metrics['count']}")
@@ -411,9 +420,9 @@ def main():
     mcp.load()
 
     orchestrator = Orchestrator(agent, registry, ContextBuilder(), pricing, mcp=mcp)
-    # RAG off for local models — query rewriting + large context too slow
+    # Ollama: base mode (no query rewriting); OpenAI: filter mode
     if provider.name == "ollama":
-        orchestrator.rag_mode = "off"
+        orchestrator.rag_mode = "base" if rag_available() else "off"
     else:
         orchestrator.rag_mode = "filter" if rag_available() else "off"
 
@@ -850,7 +859,10 @@ def main():
                     print("Использование: /index <путь> [fixed|structured]")
                 else:
                     _rag_corpus_path = _corpus
-                    _run_indexing(_chunker, _corpus)
+                    _emb_name = "ollama" if agent.provider.name == "ollama" else "openai"
+                    _emb_model = "mxbai-embed-large" if _emb_name == "ollama" else None
+                    _emb_url = agent.provider.base_url if _emb_name == "ollama" else None
+                    _run_indexing(_chunker, _corpus, _emb_name, _emb_model, _emb_url)
                 continue
             if text.startswith("/rag"):
                 parts = text.split(maxsplit=2)
@@ -858,6 +870,8 @@ def main():
                 if sub in ("base", "filter"):
                     if not rag_available():
                         print("ERROR: RAG-индекс не найден. Запустите /index.")
+                    elif sub == "filter" and agent.provider.name == "ollama":
+                        print("ERROR: filter требует OpenAI для перезаписи запросов. Используйте /rag base.")
                     else:
                         orchestrator.rag_mode = sub
                         orchestrator.rag_task_memory = {"goal": "", "key_terms": [], "turn_count": 0}

@@ -9,7 +9,7 @@ import numpy as np
 import faiss
 
 from rag.chunkers import Chunk
-from rag.embedder import Embedder
+from rag.embedder import get_embedder
 
 _cache: dict[str, tuple[faiss.Index, list[Chunk]]] = {}
 
@@ -45,15 +45,23 @@ def search(
     if index_dir is None:
         index_dir = _DEFAULT_INDEX_DIR
 
+    config_path = index_dir / "config.json"
+    if not config_path.exists():
+        raise RuntimeError("RAG index not found. Run /index first.")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+
     if chunker is None:
-        config_path = index_dir / "config.json"
-        if not config_path.exists():
-            raise RuntimeError("RAG index not found. Run /index first.")
-        config = json.loads(config_path.read_text(encoding="utf-8"))
         chunker = config.get("active", "fixed")
 
     index, chunks = _load(chunker, index_dir)
-    embedder = Embedder()
+
+    emb_provider = config.get("embedder", "openai")
+    emb_kwargs: dict = {}
+    if emb_provider == "ollama":
+        emb_model = config.get("embed_model")
+        if emb_model:
+            emb_kwargs["model"] = emb_model
+    embedder = get_embedder(emb_provider, **emb_kwargs)
     qvec = embedder.embed_one(query)
     q = np.array([qvec], dtype=np.float32)
     q = _l2_normalize(q[0])
