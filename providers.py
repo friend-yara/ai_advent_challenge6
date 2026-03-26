@@ -72,7 +72,11 @@ class OllamaProvider:
     def __init__(self, base_url: str = "http://localhost:11434",
                  default_model: str = "qwen3.5:9b",
                  num_threads: int | None = None,
-                 num_predict: int | None = None):
+                 num_predict: int | None = None,
+                 num_ctx: int = 4096,
+                 temperature: float = 0.3,
+                 repeat_penalty: float = 1.1,
+                 top_p: float = 0.9):
         """Initialize with Ollama server URL and default model."""
         self.name = "ollama"
         self.supports_tools = False
@@ -80,6 +84,10 @@ class OllamaProvider:
         self.default_model = default_model
         self.num_threads = num_threads
         self.num_predict = num_predict
+        self.num_ctx = num_ctx
+        self.temperature = temperature
+        self.repeat_penalty = repeat_penalty
+        self.top_p = top_p
 
     def _map_model(self, model: str) -> str:
         """Map model name: names with ':' pass through, others use default."""
@@ -113,12 +121,17 @@ class OllamaProvider:
         options: dict = {}
         if payload.get("temperature") is not None:
             options["temperature"] = payload["temperature"]
+        else:
+            options["temperature"] = self.temperature
         if self.num_predict is not None:
             options["num_predict"] = self.num_predict
         elif payload.get("max_output_tokens") is not None:
             options["num_predict"] = payload["max_output_tokens"]
         else:
-            options["num_predict"] = 1024
+            options["num_predict"] = 512
+        options["num_ctx"] = self.num_ctx
+        options["repeat_penalty"] = self.repeat_penalty
+        options["top_p"] = self.top_p
         if self.num_threads is not None:
             options["num_thread"] = self.num_threads
         if payload.get("stop"):
@@ -229,8 +242,10 @@ class OllamaProvider:
     def summary(self) -> str:
         """One-line status for /provider and /show."""
         parts = [f"ollama {self.default_model}"]
-        np = self.num_predict if self.num_predict is not None else 1024
+        np = self.num_predict if self.num_predict is not None else 512
         parts.append(f"predict={np}")
+        parts.append(f"ctx={self.num_ctx}")
+        parts.append(f"t={self.temperature} rp={self.repeat_penalty} top_p={self.top_p}")
         if self.num_threads is not None:
             parts.append(f"threads={self.num_threads}")
         parts.append(self.base_url)

@@ -112,6 +112,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Number of threads for Ollama inference (default: Ollama decides)")
     p.add_argument("--ollama-num-predict", type=int, default=None,
                    help="Max tokens for Ollama (overrides --max-output-tokens)")
+    p.add_argument("--ollama-num-ctx", type=int, default=4096,
+                   help="Context window size for Ollama (default: 4096)")
+    p.add_argument("--ollama-temperature", type=float, default=0.3,
+                   help="Fallback temperature for Ollama (default: 0.3)")
+    p.add_argument("--ollama-repeat-penalty", type=float, default=1.1,
+                   help="Repeat penalty for Ollama (default: 1.1)")
+    p.add_argument("--ollama-top-p", type=float, default=0.9,
+                   help="Top-p sampling for Ollama (default: 0.9)")
 
     return p
 
@@ -375,6 +383,10 @@ def main():
             default_model=args.ollama_model,
             num_threads=args.ollama_threads,
             num_predict=args.ollama_num_predict,
+            num_ctx=args.ollama_num_ctx,
+            temperature=args.ollama_temperature,
+            repeat_penalty=args.ollama_repeat_penalty,
+            top_p=args.ollama_top_p,
         )
     else:
         provider = OpenAIProvider(api_key=api_key)
@@ -982,6 +994,10 @@ def main():
                         default_model=args.ollama_model,
                         num_threads=args.ollama_threads,
                         num_predict=args.ollama_num_predict,
+                        num_ctx=args.ollama_num_ctx,
+                        temperature=args.ollama_temperature,
+                        repeat_penalty=args.ollama_repeat_penalty,
+                        top_p=args.ollama_top_p,
                     )
                     print(f"OK: provider = {agent.provider.summary()}")
                 else:

@@ -189,7 +189,10 @@ class Orchestrator:
 
         # Build context prompt (skip heavy context for local providers)
         if ag.provider.name == "ollama":
-            prompt = user_text
+            prompt = [
+                {"role": "system", "content": "Be concise and factual. Structure your answer. Do not make up facts."},
+                {"role": "user", "content": user_text},
+            ]
         else:
             prompt = self.ctx.build(spec, user_text, tc, stm, ltm, ag.facts)
 
@@ -203,11 +206,10 @@ class Orchestrator:
             )
             if is_local:
                 # Compact prompt: grounding instruction + context + question
-                prompt = (
-                    "Answer ONLY from the documents below. "
-                    "If the documents don't contain enough information, say so.\n\n"
-                    + rag_text + "\n\nQuestion: " + user_text
-                )
+                prompt = [
+                    {"role": "system", "content": "Answer ONLY from the documents below. Be concise."},
+                    {"role": "user", "content": rag_text + "\n\nQuestion: " + user_text},
+                ]
             else:
                 # OpenAI path: inject task memory + RAG into built context
                 tm = self.rag_task_memory
