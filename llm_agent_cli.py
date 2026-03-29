@@ -104,10 +104,12 @@ def build_parser() -> argparse.ArgumentParser:
     # LLM provider selection
     p.add_argument("--provider", default="openai", choices=["openai", "ollama"],
                    help="LLM provider: openai (default) or ollama")
-    p.add_argument("--ollama-url", default="http://localhost:11434",
-                   help="Ollama server URL (default: http://localhost:11434)")
-    p.add_argument("--ollama-model", default="qwen3.5:9b",
-                   help="Default Ollama model (default: qwen3.5:9b)")
+    p.add_argument("--ollama-url",
+                   default=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
+                   help="Ollama server URL (env: OLLAMA_URL, default: http://localhost:11434)")
+    p.add_argument("--ollama-model",
+                   default=os.environ.get("OLLAMA_MODEL", "qwen3.5:9b"),
+                   help="Default Ollama model (env: OLLAMA_MODEL, default: qwen3.5:9b)")
     p.add_argument("--ollama-threads", type=int, default=None,
                    help="Number of threads for Ollama inference (default: Ollama decides)")
     p.add_argument("--ollama-num-predict", type=int, default=None,
@@ -197,6 +199,7 @@ Commands:
   /provider ollama [url]   Switch to Ollama (default: localhost:11434)
   /model                   Show current model + available Ollama models
   /model <name>            Switch Ollama default model (checks availability)
+  /ping                    Check Ollama endpoint connectivity
 
 Prompt format: [STATE:agent] >
   Example: [PLAN:planner] > or [EXEC:coder] >
@@ -1000,8 +1003,29 @@ def main():
                         top_p=args.ollama_top_p,
                     )
                     print(f"OK: provider = {agent.provider.summary()}")
+                    # Auto-ping to verify connectivity
+                    models = agent.provider.list_models()
+                    if models:
+                        print(f"  Доступно моделей: {len(models)}")
+                    else:
+                        print("  Предупреждение: Ollama недоступен или без моделей")
                 else:
                     print("Использование: /provider | /provider openai | /provider ollama [url]")
+                continue
+            if text.startswith("/ping"):
+                if agent.provider.name != "ollama":
+                    print("Ping доступен только для Ollama")
+                else:
+                    ping_start = time.monotonic()
+                    models = agent.provider.list_models()
+                    ping_ms = (time.monotonic() - ping_start) * 1000
+                    if models:
+                        print(f"OK: {agent.provider.base_url} — {ping_ms:.0f}ms, "
+                              f"моделей: {len(models)}")
+                        for m in models:
+                            print(f"  {m}")
+                    else:
+                        print(f"FAIL: {agent.provider.base_url} — недоступен")
                 continue
             print("Unknown command")
             continue

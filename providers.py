@@ -164,59 +164,72 @@ class OllamaProvider:
         """Convert payload, POST to Ollama /api/chat (streaming), normalize response."""
         url = f"{self.base_url}/api/chat"
         ollama_payload = self._convert_payload(payload)
-        # Local models are slower; enforce a minimum timeout
+        # Remote/local models are slower; enforce a minimum timeout
         effective_timeout = max(timeout, 180)
 
+        retries = 3
+        delay = 3
         print("Ollama: генерация", end="", file=sys.stderr, flush=True)
         start = time.monotonic()
-        try:
-            r = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=ollama_payload,
-                timeout=effective_timeout,
-                stream=True,
-            )
-            collected = ""
-            data: dict = {}
-            dot_interval = 2.0  # print dot every N seconds
-            last_dot = start
-            for line in r.iter_lines():
-                if not line:
+        for attempt in range(retries):
+            try:
+                collected = ""
+                data: dict = {}
+                r = requests.post(
+                    url,
+                    headers={"Content-Type": "application/json"},
+                    json=ollama_payload,
+                    timeout=effective_timeout,
+                    stream=True,
+                )
+                dot_interval = 2.0  # print dot every N seconds
+                last_dot = start
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    if chunk.get("error"):
+                        elapsed = time.monotonic() - start
+                        print(f" ошибка {elapsed:.1f}s", file=sys.stderr, flush=True)
+                        return {"error": {"message": chunk["error"]}}, elapsed
+                    token = chunk.get("message", {}).get("content", "")
+                    collected += token
+                    now = time.monotonic()
+                    if now - last_dot >= dot_interval:
+                        print(".", end="", file=sys.stderr, flush=True)
+                        last_dot = now
+                    if chunk.get("done"):
+                        data = chunk
+                        break
+                elapsed = time.monotonic() - start
+                eval_count = data.get("eval_count", 0)
+                eval_duration = data.get("eval_duration", 0)
+                if eval_count and eval_duration:
+                    tok_per_sec = eval_count / (eval_duration / 1e9)
+                    print(f" {elapsed:.1f}s, {tok_per_sec:.1f} tok/s", file=sys.stderr, flush=True)
+                else:
+                    print(f" {elapsed:.1f}s", file=sys.stderr, flush=True)
+                break  # success — exit retry loop
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.ReadTimeout,
+                    ConnectionResetError) as exc:
+                if attempt < retries - 1:
+                    print(f" повтор {attempt + 2}/{retries} через {delay}s...",
+                          end="", file=sys.stderr, flush=True)
+                    time.sleep(delay)
+                    delay *= 2
                     continue
-                chunk = json.loads(line)
-                if chunk.get("error"):
-                    elapsed = time.monotonic() - start
-                    print(f" ошибка {elapsed:.1f}s", file=sys.stderr, flush=True)
-                    return {"error": {"message": chunk["error"]}}, elapsed
-                token = chunk.get("message", {}).get("content", "")
-                collected += token
-                now = time.monotonic()
-                if now - last_dot >= dot_interval:
-                    print(".", end="", file=sys.stderr, flush=True)
-                    last_dot = now
-                if chunk.get("done"):
-                    data = chunk
-                    break
-            elapsed = time.monotonic() - start
-            eval_count = data.get("eval_count", 0)
-            eval_duration = data.get("eval_duration", 0)
-            if eval_count and eval_duration:
-                tok_per_sec = eval_count / (eval_duration / 1e9)
-                print(f" {elapsed:.1f}s, {tok_per_sec:.1f} tok/s", file=sys.stderr, flush=True)
-            else:
-                print(f" {elapsed:.1f}s", file=sys.stderr, flush=True)
-        except requests.exceptions.ConnectionError:
-            print(" ошибка", file=sys.stderr, flush=True)
-            raise RuntimeError(
-                f"Cannot connect to Ollama at {self.base_url}"
-            )
-        except requests.exceptions.ReadTimeout:
-            print(" таймаут", file=sys.stderr, flush=True)
-            raise RuntimeError(
-                f"Ollama request timed out after {effective_timeout}s. "
-                f"Try increasing --timeout."
-            )
+                # Final attempt failed
+                print(" ошибка", file=sys.stderr, flush=True)
+                if isinstance(exc, requests.exceptions.ReadTimeout):
+                    raise RuntimeError(
+                        f"Ollama request timed out after {effective_timeout}s "
+                        f"({retries} attempts). Try increasing --timeout."
+                    )
+                raise RuntimeError(
+                    f"Cannot connect to Ollama at {self.base_url} "
+                    f"({retries} attempts): {exc}"
+                )
 
         # Build response from streamed content
         if not data:
