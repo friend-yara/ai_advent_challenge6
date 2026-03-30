@@ -1,0 +1,3 @@
+name: git
+url: http://127.0.0.1:8004/mcp
+description: Git — информация о репозитории (ветки, лог, diff)

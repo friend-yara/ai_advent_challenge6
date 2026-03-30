@@ -21,6 +21,7 @@ Demo flow (orchestrator + agents):
 """
 
 import os
+import subprocess
 import sys
 import argparse
 import threading
@@ -167,6 +168,7 @@ def print_help():
 Commands:
   /exit                    Exit (progress saved automatically)
   /help                    Show this help
+  /help <question>         Answer question about project (RAG + git + LLM)
   /reset                   Clear working memory + dialogue, save both files
   /save                    Save working state to state.toon
   /load                    Load working state from state.toon
@@ -218,6 +220,89 @@ Invariant checks:
   - on /state VALIDATION: auto-checks plan against invariants
 """
     )
+
+
+def handle_help_question(question: str, agent) -> None:
+    """Answer a developer question using RAG docs + git context."""
+    from mcp.mcp_git import dispatch_git_tool
+
+    # 1. Git context (direct subprocess, no HTTP)
+    git_parts = []
+    try:
+        r = dispatch_git_tool("git_branch", {})
+        git_parts.append(r["content"][0]["text"])
+    except Exception:
+        pass
+    try:
+        r = dispatch_git_tool("git_log", {"count": 5})
+        git_parts.append("Recent commits:\n" + r["content"][0]["text"])
+    except Exception:
+        pass
+    git_context = "\n".join(git_parts) if git_parts else "(git unavailable)"
+
+    # 2. RAG context
+    rag_context = ""
+    rag_sources = []
+    if rag_available():
+        from rag.retriever import search as rag_search, extract_quote
+        try:
+            results = rag_search(question, top_k=5)
+            if results:
+                parts = [f"[{r['filename']}]\n{r['text']}" for r in results]
+                rag_context = "\n\n---\n\n".join(parts)
+                rag_sources = results
+        except Exception as e:
+            print(f"[WARN] RAG: {e}", file=sys.stderr)
+    else:
+        print("(RAG-индекс не найден. Для лучших ответов: /index . fixed)")
+
+    # 3. Build LLM prompt
+    user_parts = [f"## Git\n{git_context}"]
+    if rag_context:
+        user_parts.append(f"## Документация\n{rag_context}")
+    user_parts.append(f"## Вопрос\n{question}")
+
+    payload = {
+        "model": agent.model,
+        "input": [
+            {"role": "system", "content": (
+                "Ты — ассистент разработчика. Отвечай на вопрос, используя "
+                "предоставленные фрагменты документации и git-контекст. "
+                "Будь кратким и конкретным. Если документация не покрывает "
+                "вопрос, скажи об этом."
+            )},
+            {"role": "user", "content": "\n\n".join(user_parts)},
+        ],
+    }
+
+    # 4. Call LLM
+    try:
+        data, elapsed = agent.provider.post(payload, agent.timeout)
+        output_items = data.get("output", [])
+        answer_parts = []
+        for item in output_items:
+            if item.get("type") == "message":
+                for c in item.get("content", []):
+                    if c.get("type") == "output_text":
+                        answer_parts.append(c.get("text", ""))
+        answer = "\n".join(answer_parts).strip()
+        if not answer:
+            answer = data.get("output_text", "(пустой ответ)")
+        print(answer)
+    except Exception as e:
+        print(f"LLM error: {e}", file=sys.stderr)
+        return
+
+    # 5. Sources
+    if rag_sources:
+        from rag.retriever import extract_quote
+        print()
+        seen = set()
+        for r in rag_sources:
+            fname = r.get("filename", "?")
+            if fname not in seen:
+                seen.add(fname)
+                print(f"  src: {fname}")
 
 
 def print_metrics(m: dict):
@@ -430,6 +515,20 @@ def main():
     # Build agent registry + orchestrator
     registry = AgentRegistry()
     registry.load(args.agents_dir)
+    # Auto-start local MCP servers
+    _mcp_proc = None
+    _mcp_script = Path(__file__).parent / "mcp" / "server.py"
+    if _mcp_script.exists():
+        try:
+            _mcp_proc = subprocess.Popen(
+                [sys.executable, str(_mcp_script)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"[WARN] MCP servers not started: {e}", file=sys.stderr)
+
     # Build MCP client (loads server specs + pre-fetches tool schemas)
     mcp = MCPClient(args.tools_dir)
     mcp.load()
@@ -560,8 +659,12 @@ def main():
         if text.startswith("/"):
             if text == "/exit":
                 break
-            if text == "/help":
-                print_help()
+            if text.startswith("/help"):
+                help_arg = text[5:].strip()
+                if not help_arg:
+                    print_help()
+                    continue
+                handle_help_question(help_arg, agent)
                 continue
             if text == "/reset":
                 agent.reset_working()
@@ -1159,6 +1262,10 @@ def main():
                 agent.save_state(args.state)
             except Exception:
                 pass
+
+    # Stop local MCP servers
+    if _mcp_proc is not None:
+        _mcp_proc.terminate()
 
     print("Bye.")
 
