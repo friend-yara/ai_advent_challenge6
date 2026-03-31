@@ -800,6 +800,7 @@ def main():
                               "/state PLAN — к планированию | "
                               "/exit — выйти")
                     print_metrics(metrics)
+                    agent.session_metrics.record(metrics)
                     agent.save_state(args.state)
                     if not args.no_auto_save_short_term:
                         agent.save_short_term(args.short_term_file)
@@ -856,6 +857,7 @@ def main():
                 print(f"[mcp]     {mcp.summary()}")
                 rag_idx = "index=ok" if rag_available() else "index=missing"
                 print(f"[rag]     mode={orchestrator.rag_mode}, {rag_idx}")
+                print(f"[session]  {agent.session_metrics.summary()}")
                 continue
             if text == "/checkpoint":
                 agent.checkpoint()
@@ -1164,6 +1166,7 @@ def main():
                     else:
                         print(answer, end="")
                     print_metrics(metrics)
+                    agent.session_metrics.record(metrics)
                     print("Готов перейти к выполнению. "
                           "Введите /state EXEC или внесите корректировки.")
                 else:
@@ -1172,12 +1175,14 @@ def main():
                     else:
                         print(answer, end="")
                     print_metrics(metrics)
+                    agent.session_metrics.record(metrics)
             else:
                 if _has_rag_results:
                     _print_rag_answer(answer, orchestrator.last_rag_results, orchestrator.last_rag_metadata)
                 else:
                     print(answer, end="")
                 print_metrics(metrics)
+                agent.session_metrics.record(metrics)
 
             if _has_rag_results and orchestrator.last_rag_lang_warn:
                 print(orchestrator.last_rag_lang_warn, file=sys.stderr)
