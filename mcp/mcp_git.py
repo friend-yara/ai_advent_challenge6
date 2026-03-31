@@ -72,6 +72,35 @@ GIT_TOOLS: list[dict] = [
             "required": [],
         },
     },
+    {
+        "name": "git_diff_branch",
+        "title": "Git diff between branches",
+        "description": (
+            "Show diff between two branches or refs. "
+            "Useful for reviewing PR changes locally."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "base": {
+                    "type": "string",
+                    "description": "Base branch/ref (e.g. 'main')",
+                    "default": "main",
+                },
+                "head": {
+                    "type": "string",
+                    "description": "Head branch/ref (e.g. 'feature-x'). Defaults to HEAD.",
+                    "default": "HEAD",
+                },
+                "name_only": {
+                    "type": "boolean",
+                    "description": "If true, show only changed file names",
+                    "default": False,
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -96,6 +125,12 @@ def dispatch_git_tool(tool_name: str, arguments: dict) -> dict:
         return _git_log(arguments.get("count", 10))
     if tool_name == "git_diff":
         return _git_diff(arguments.get("staged", False))
+    if tool_name == "git_diff_branch":
+        return _git_diff_branch(
+            arguments.get("base", "main"),
+            arguments.get("head", "HEAD"),
+            arguments.get("name_only", False),
+        )
     raise KeyError(f"Unknown git tool: {tool_name!r}")
 
 
@@ -151,6 +186,22 @@ def _git_diff(staged: bool) -> dict:
     if not diff:
         label = "staged" if staged else "working directory"
         return {"content": [{"type": "text", "text": f"No changes in {label}."}]}
+    if len(diff) > _MAX_DIFF_CHARS:
+        diff = diff[:_MAX_DIFF_CHARS] + "\n\n... (truncated)"
+    return {"content": [{"type": "text", "text": diff}]}
+
+
+def _git_diff_branch(base: str, head: str, name_only: bool) -> dict:
+    """Return diff between two branches/refs."""
+    args = ["diff", f"{base}...{head}", "--no-color"]
+    if name_only:
+        args.append("--name-only")
+    try:
+        diff = _run_git(*args)
+    except RuntimeError as e:
+        return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+    if not diff:
+        return {"content": [{"type": "text", "text": f"No differences between {base} and {head}."}]}
     if len(diff) > _MAX_DIFF_CHARS:
         diff = diff[:_MAX_DIFF_CHARS] + "\n\n... (truncated)"
     return {"content": [{"type": "text", "text": diff}]}
