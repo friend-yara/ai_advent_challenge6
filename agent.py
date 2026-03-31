@@ -439,6 +439,49 @@ class ShortTermMemory:
         self.summary = data.get("summary", "") or ""
 
 
+# ---------------- Session Metrics ----------------
+
+
+class SessionMetrics:
+    """Accumulates per-session LLM call metrics."""
+
+    def __init__(self):
+        self.total_calls: int = 0
+        self.total_input_tokens: int = 0
+        self.total_output_tokens: int = 0
+        self.total_cost: float = 0.0
+        self.total_time: float = 0.0
+        self.calls_by_agent: dict[str, int] = {}
+
+    def record(self, metrics: dict) -> None:
+        """Record metrics from a single LLM call."""
+        self.total_calls += 1
+        self.total_input_tokens += metrics.get("in") or 0
+        self.total_output_tokens += metrics.get("out") or 0
+        self.total_time += metrics.get("time") or 0.0
+
+        cost = metrics.get("cost", "")
+        if isinstance(cost, str) and cost.startswith("$"):
+            try:
+                self.total_cost += float(cost[1:])
+            except ValueError:
+                pass
+
+        agent_name = metrics.get("agent", "unknown")
+        self.calls_by_agent[agent_name] = self.calls_by_agent.get(agent_name, 0) + 1
+
+    def summary(self) -> str:
+        """One-line summary for /show."""
+        agents = ", ".join(f"{k}:{v}" for k, v in self.calls_by_agent.items())
+        return (
+            f"calls={self.total_calls}, "
+            f"tokens={self.total_input_tokens}+{self.total_output_tokens}, "
+            f"cost=${self.total_cost:.4f}, "
+            f"time={self.total_time:.1f}s, "
+            f"agents=[{agents}]"
+        )
+
+
 class Agent:
     """
     Thin LLM caller with memory layers and TOON persistence.
@@ -508,6 +551,9 @@ class Agent:
         self.facts: dict[str, str] = {}
         self.current_branch: str = "main"
         self.branches: dict[str, dict] = {"main": self._snapshot()}
+
+        # Session metrics accumulator
+        self.session_metrics = SessionMetrics()
 
     # ---------------- State management ----------------
 
