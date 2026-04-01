@@ -316,6 +316,11 @@ class Orchestrator:
                 if isinstance(item, dict) and item.get("type") == "function_call"
             ]
 
+        # Suppress RAG citations when MCP tools answered the query
+        if tools_used:
+            self.last_rag_results = []
+            self.last_rag_lang_warn = None
+
         # Extract final text
         if ag.print_json:
             text = json.dumps(data, ensure_ascii=False, indent=2)
