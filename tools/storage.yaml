@@ -1,3 +1,3 @@
 name: storage
 url: http://127.0.0.1:8003/mcp
-description: Файловое хранилище — save_to_file
+description: Файловое хранилище — save_to_file, read_file
