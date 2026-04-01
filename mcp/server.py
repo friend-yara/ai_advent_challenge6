@@ -2,11 +2,12 @@
 """
 mcp/server.py — Multi-server MCP launcher.
 
-Starts four domain MCP servers on separate ports:
+Starts five domain MCP servers on separate ports:
   WeatherMCPHandler   → 127.0.0.1:8001  (get_forecast, summarize_forecast)
   SchedulerMCPHandler → 127.0.0.1:8002  (reminder)
-  GitMCPHandler       → 127.0.0.1:8004  (git_branch, git_log, git_diff)
   StorageMCPHandler   → 127.0.0.1:8003  (save_to_file, read_file)
+  GitMCPHandler       → 127.0.0.1:8004  (git_branch, git_log, git_diff)
+  CRMMCPHandler       → 127.0.0.1:8005  (get_ticket, search_tickets, list_user_tickets)
 
 Usage:
     python mcp/server.py
@@ -29,6 +30,7 @@ from mcp.base import (
     ERR_SERVER_ERROR,
     MCPBaseHandler,
 )
+from mcp.mcp_crm import CRM_TOOLS, dispatch_crm_tool, init_crm
 from mcp.mcp_scheduler import SCHEDULER_TOOLS, dispatch_scheduler_tool, init_scheduler
 from mcp.mcp_storage import STORAGE_TOOLS, dispatch_storage_tool
 from mcp.mcp_git import GIT_TOOLS, dispatch_git_tool
@@ -111,6 +113,30 @@ class GitMCPHandler(MCPBaseHandler):
             self._send_rpc_error(req_id, ERR_SERVER_ERROR, f"Tool error: {e}")
 
 
+class CRMMCPHandler(MCPBaseHandler):
+    """MCP handler for CRM/support ticket tools."""
+
+    SERVER_NAME    = "local-mcp-crm"
+    SERVER_VERSION = "0.1"
+    INSTRUCTIONS   = "CRM system. Tools: get_ticket, search_tickets, list_user_tickets."
+    TOOLS          = CRM_TOOLS
+
+    def _get_tools(self) -> list[dict]:
+        return CRM_TOOLS
+
+    def _dispatch_tool(self, req_id, tool_name: str,
+                       arguments: dict, session_id: str):
+        try:
+            result = dispatch_crm_tool(tool_name, arguments)
+            self._send_rpc_ok(req_id, result)
+        except KeyError as e:
+            self._send_rpc_error(req_id, ERR_METHOD_NOT_FOUND, str(e))
+        except ValueError as e:
+            self._send_rpc_error(req_id, ERR_INVALID_PARAMS, str(e))
+        except Exception as e:
+            self._send_rpc_error(req_id, ERR_SERVER_ERROR, f"Tool error: {e}")
+
+
 class StorageMCPHandler(MCPBaseHandler):
     """MCP handler for file storage tools."""
 
@@ -145,6 +171,7 @@ _SERVERS = [
     (WeatherMCPHandler,   8001),
     (SchedulerMCPHandler, 8002),
     (GitMCPHandler,       8004),
+    (CRMMCPHandler,       8005),
     (StorageMCPHandler,   8003),
 ]
 
@@ -156,6 +183,7 @@ def _start_server(handler_class: type, port: int) -> None:
 
 
 if __name__ == "__main__":
+    init_crm()
     init_scheduler()
 
     print("Starting MCP domain servers:")

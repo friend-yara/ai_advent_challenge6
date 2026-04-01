@@ -49,7 +49,7 @@ def _l2_normalize(vectors: np.ndarray) -> np.ndarray:
 
 
 def build_index(
-    corpus_dir: Path,
+    corpus_dir: Path | list[Path],
     chunker: str,
     index_dir: Path,
     embedder_name: str = "openai",
@@ -57,6 +57,9 @@ def build_index(
     ollama_url: str | None = None,
 ) -> dict:
     """Build FAISS index from corpus and persist to disk. Returns metrics."""
+    # Normalise to list
+    corpus_dirs = corpus_dir if isinstance(corpus_dir, list) else [corpus_dir]
+
     # Select chunker
     if chunker == "fixed":
         ch = FixedSizeChunker()
@@ -65,37 +68,38 @@ def build_index(
     else:
         raise ValueError(f"Unknown chunker: {chunker!r}")
 
-    # Walk corpus
+    # Walk corpus directories
     use_structured = isinstance(ch, StructuredChunker)
     all_chunks: list[Chunk] = []
-    for md_file in sorted(corpus_dir.glob("**/*.md")):
-        try:
-            text = md_file.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
-        text = _strip_frontmatter(text) if use_structured else _clean(text)
-        if not text.strip():
-            continue
-        rel = str(md_file.relative_to(corpus_dir))
-        fname = md_file.name
-        chunks = ch.chunk(text, rel, fname)
-        if use_structured:
-            for c in chunks:
-                c.text = _md_to_plain(c.text).strip()
-            chunks = [c for c in chunks if c.text]
-        all_chunks.extend(chunks)
+    for cdir in corpus_dirs:
+        for md_file in sorted(cdir.glob("**/*.md")):
+            try:
+                text = md_file.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            text = _strip_frontmatter(text) if use_structured else _clean(text)
+            if not text.strip():
+                continue
+            rel = str(md_file.relative_to(cdir))
+            fname = md_file.name
+            chunks = ch.chunk(text, rel, fname)
+            if use_structured:
+                for c in chunks:
+                    c.text = _md_to_plain(c.text).strip()
+                chunks = [c for c in chunks if c.text]
+            all_chunks.extend(chunks)
 
-    for txt_file in sorted(corpus_dir.glob("**/*.txt")):
-        try:
-            text = txt_file.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
-        text = _clean(text)
-        if not text.strip():
-            continue
-        rel = str(txt_file.relative_to(corpus_dir))
-        fname = txt_file.name
-        all_chunks.extend(ch.chunk(text, rel, fname))
+        for txt_file in sorted(cdir.glob("**/*.txt")):
+            try:
+                text = txt_file.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            text = _clean(text)
+            if not text.strip():
+                continue
+            rel = str(txt_file.relative_to(cdir))
+            fname = txt_file.name
+            all_chunks.extend(ch.chunk(text, rel, fname))
 
     if not all_chunks:
         raise RuntimeError(f"No chunks produced from {corpus_dir}")

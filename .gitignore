@@ -2,6 +2,7 @@
 __pycache__/
 *.toon
 mcp/reminders.db
+mcp/support.db
 *.db-shm
 *.db-wal
 rag/index/

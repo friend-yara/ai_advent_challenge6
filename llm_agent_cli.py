@@ -91,9 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--use-project-memory", action="store_true", default=True)
     p.add_argument("--use-invariants", action="store_true", default=True)
 
-    # Agents directory
+    # Agents directory and initial agent
     p.add_argument("--agents-dir", default="agents",
                    help="Directory containing agent spec *.md files")
+    p.add_argument("--agent", default=None,
+                   help="Pin agent for the first message (e.g. --agent support)")
 
     # MCP tools directory
     p.add_argument("--tools-dir", default="tools",
@@ -636,6 +638,14 @@ def main():
         orchestrator.rag_mode = "base" if rag_available() else "off"
     else:
         orchestrator.rag_mode = "filter" if rag_available() else "off"
+
+    # Set persistent agent if --agent flag was provided
+    if args.agent:
+        if registry.get(args.agent) is None:
+            print(f"[WARN] --agent {args.agent}: agent not found", file=sys.stderr)
+        else:
+            orchestrator._persistent_agent = args.agent
+            print(f"Agent:         {args.agent} (persistent, all messages)")
 
     print(f"Provider:      {agent.provider.summary()}")
     print(f"Agents loaded: {registry.summary()}")

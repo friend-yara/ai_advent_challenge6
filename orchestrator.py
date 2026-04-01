@@ -115,6 +115,7 @@ class Orchestrator:
         self.mcp = mcp
         self._confirm_cb = confirm_callback
         self.metrics = metrics_store
+        self._persistent_agent: str | None = None
         # Pinned agent for the next turn only (set via /agent <name>)
         self._pinned_agent: str | None = None
         # RAG mode — "off" | "base" | "filter"; set at REPL startup if index exists
@@ -178,8 +179,8 @@ class Orchestrator:
         ltm = ag.ltm
 
         # Select agent spec
-        name = agent_name or self._pinned_agent
-        self._pinned_agent = None   # consume pin after one use
+        name = agent_name or self._pinned_agent or self._persistent_agent
+        self._pinned_agent = None   # consume one-shot pin
         spec = self._select_spec(name, tc.state)
 
         # Record message in STM
@@ -209,8 +210,8 @@ class Orchestrator:
         else:
             prompt = self.ctx.build(spec, user_text, tc, stm, ltm, ag.facts)
 
-        # RAG pre-search: always search before LLM call, inject results into prompt
-        if self.rag_enabled:
+        # RAG pre-search: skip for agents that use document_search as a tool (e.g. support)
+        if self.rag_enabled and spec.name != "support":
             is_local = ag.provider.name == "ollama"
             rag_query = user_text if is_local else self._build_rag_query(user_text)
             rag_top_k = 3 if is_local else 5
@@ -458,7 +459,7 @@ class Orchestrator:
 
     def current_agent_name(self) -> str:
         """Return the name of the agent that would be selected right now."""
-        name = self._pinned_agent
+        name = self._pinned_agent or self._persistent_agent
         if name:
             return name
         spec = self.registry.for_state(self.agent.tc.state)
@@ -551,8 +552,8 @@ class Orchestrator:
         """
         tools: list[dict] = []
 
-        # MCP tools: planner and assistant
-        if spec.name in ("planner", "assistant") and self.mcp is not None:
+        # MCP tools: planner, assistant, support
+        if spec.name in ("planner", "assistant", "support") and self.mcp is not None:
             raw = self.mcp.all_tools_for_llm()
             if raw:
                 tools.extend(
@@ -853,6 +854,10 @@ class Orchestrator:
           - the original user message
           - one function_call item per tool call
           - one function_call_output item per tool result
+
+        The agent's system prompt is passed via `instructions` so the LLM
+        retains its identity and behaviour rules (the Responses API is
+        stateless — without this, the follow-up call has no context).
         """
         input_items: list[dict] = [{"role": "user", "content": user_text}]
 
@@ -873,6 +878,7 @@ class Orchestrator:
 
         payload: dict = {
             "model": spec.model,
+            "instructions": spec.prompt,
             "input": input_items,
         }
         if tools_for_llm:
