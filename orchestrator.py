@@ -121,10 +121,10 @@ class Orchestrator:
         self.rag_mode: str = "off"
         self.rag_initial_top_k: int = 15
         self.rag_final_top_k: int = 5
-        self.rag_similarity_threshold: float = 0.38
+        self.rag_similarity_threshold: float = 0.45
         self.rag_use_keyword_filter: bool = False
         self.rag_index_lang: str = "en"  # ожидаемый язык индекса
-        self.rag_min_results: int = 1    # минимум чанков для "strong context"
+        self.rag_min_results: int = 2    # минимум чанков для "strong context"
         self.last_rag_results: list = []
         self.last_rag_metadata: dict = {}
         self.last_rag_lang_warn: str | None = None
@@ -758,9 +758,18 @@ class Orchestrator:
         )
         try:
             if self.rag_mode == "base":
-                from rag.retriever import search
+                from rag.retriever import search, filter_results
                 results = search(query, top_k=top_k)
-                result_data = {"results": results, "mode": "base"}
+                results, dropped = filter_results(
+                    results,
+                    threshold=self.rag_similarity_threshold,
+                    query=query,
+                    use_keyword=self.rag_use_keyword_filter,
+                )
+                result_data = {
+                    "results": results, "mode": "base",
+                    "filtered_out": dropped,
+                }
                 if len(results) < self.rag_min_results:
                     self.last_rag_results = []
                     self.last_rag_metadata = result_data
