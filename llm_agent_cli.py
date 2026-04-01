@@ -20,6 +20,7 @@ Demo flow (orchestrator + agents):
   /agent list        — list all available agents
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -32,6 +33,7 @@ from agent import Agent, LongTermMemory, load_pricing_models
 from agents import AgentRegistry
 from context_builder import ContextBuilder
 from mcp_client import MCPClient
+from metrics import MetricsStore
 from orchestrator import Orchestrator, rag_available
 from providers import OpenAIProvider, OllamaProvider
 
@@ -313,6 +315,84 @@ def print_metrics(m: dict):
     print(f" ({provider}/{model}, in={m['in']}, out={m['out']}, cost={cost})\n")
 
 
+def _handle_review(text: str, agent) -> None:
+    """Handle /review command: run AI code review pipeline.
+
+    Usage:
+        /review HEAD~1              — review last commit diff
+        /review path/to/file.diff   — review diff from file
+        /review --pr 42 --repo u/r  — review GitHub PR
+    """
+    from ai_review import ReviewPipeline
+
+    parts = text[7:].strip().split()
+    if not parts:
+        print("Usage: /review HEAD~1 | /review file.diff | /review --pr N --repo owner/name")
+        return
+
+    diff = ""
+    post = False
+    repo = None
+    pr_number = None
+
+    # Parse arguments
+    i = 0
+    while i < len(parts):
+        if parts[i] == "--pr" and i + 1 < len(parts):
+            pr_number = int(parts[i + 1])
+            i += 2
+        elif parts[i] == "--repo" and i + 1 < len(parts):
+            repo = parts[i + 1]
+            i += 2
+        elif parts[i] == "--post":
+            post = True
+            i += 1
+        else:
+            # Treat as git ref or file path
+            ref_or_file = parts[i]
+            i += 1
+            path = Path(ref_or_file)
+            if path.exists():
+                diff = path.read_text(encoding="utf-8")
+            else:
+                # Assume git ref
+                try:
+                    result = subprocess.run(
+                        ["git", "diff", ref_or_file],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    diff = result.stdout
+                except Exception as e:
+                    print(f"[ERROR] git diff failed: {e}", file=sys.stderr)
+                    return
+
+    # GitHub PR mode
+    if pr_number and repo and not diff:
+        from ai_review import _fetch_pr_diff
+        try:
+            diff = _fetch_pr_diff(repo, pr_number)
+        except SystemExit:
+            return
+
+    if not diff.strip():
+        print("[INFO] Empty diff — nothing to review.")
+        return
+
+    pipeline = ReviewPipeline(provider=agent.provider, model="gpt-4.1-mini")
+    result = pipeline.run_with_retry(diff, post_to_github=post, repo=repo, pr_number=pr_number)
+
+    if result["status"] == "ok":
+        print(result["review_text"])
+        m = result["metrics"]
+        print(
+            f"\n[REVIEW] Latency: {m['latency']}s | "
+            f"Tokens: {m.get('in', '?')}→{m.get('out', '?')}",
+            file=sys.stderr,
+        )
+    else:
+        print(f"[ERROR] Review failed: {result.get('error', 'unknown')}", file=sys.stderr)
+
+
 def _print_cli(msg: str) -> None:
     """Print a message cleanly over the prompt_toolkit prompt if available."""
     if patch_stdout is not None:
@@ -533,7 +613,24 @@ def main():
     mcp = MCPClient(args.tools_dir)
     mcp.load()
 
-    orchestrator = Orchestrator(agent, registry, ContextBuilder(), pricing, mcp=mcp)
+    def _confirm_tool(tool_name: str, description: str) -> bool:
+        """Ask user to confirm a dangerous tool call."""
+        print(f"\n[SANDBOX] Опасный инструмент: {description}")
+        try:
+            answer = input("Разрешить выполнение? (y/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return answer in ("y", "yes", "да")
+
+    # Metrics store (JSONL, next to state.toon)
+    metrics_path = Path(args.state).parent / "metrics.jsonl"
+    metrics_store = MetricsStore(metrics_path)
+
+    orchestrator = Orchestrator(
+        agent, registry, ContextBuilder(), pricing,
+        mcp=mcp, confirm_callback=_confirm_tool,
+        metrics_store=metrics_store,
+    )
     # Ollama: base mode (no query rewriting); OpenAI: filter mode
     if provider.name == "ollama":
         orchestrator.rag_mode = "base" if rag_available() else "off"
@@ -665,6 +762,9 @@ def main():
                     print_help()
                     continue
                 handle_help_question(help_arg, agent)
+                continue
+            if text.startswith("/review"):
+                _handle_review(text, agent)
                 continue
             if text == "/reset":
                 agent.reset_working()
@@ -1129,6 +1229,24 @@ def main():
                             print(f"  {m}")
                     else:
                         print(f"FAIL: {agent.provider.base_url} — недоступен")
+                continue
+            if text.startswith("/rate"):
+                score_str = text[5:].strip()
+                try:
+                    score = int(score_str)
+                    if not 1 <= score <= 5:
+                        raise ValueError
+                    metrics_store.record("rating", {
+                        "score": score,
+                        "agent": orchestrator.current_agent_name(),
+                    })
+                    print(f"Оценка {score} сохранена.")
+                except (ValueError, TypeError):
+                    print("Usage: /rate <1-5>")
+                continue
+            if text == "/metrics":
+                s = metrics_store.summary()
+                print(json.dumps(s, ensure_ascii=False, indent=2))
                 continue
             print("Unknown command")
             continue

@@ -30,6 +30,7 @@ Demo flow:
 
 import json
 import sys
+from typing import Callable
 
 from agents import AgentRegistry, AgentSpec
 from context_builder import ContextBuilder
@@ -40,6 +41,14 @@ try:
     _LANGDETECT_AVAILABLE = True
 except ImportError:
     _LANGDETECT_AVAILABLE = False
+
+# ---------------- Tool safety classification ----------------
+
+_TOOL_SAFETY: dict[str, str] = {
+    "save_to_file": "dangerous",
+    "reminder": "dangerous",
+    # Everything else defaults to "safe"
+}
 
 # ---------------- RAG tool definition ----------------
 
@@ -95,6 +104,8 @@ class Orchestrator:
         context_builder: ContextBuilder,
         pricing: dict,
         mcp=None,               # MCPClient | None
+        confirm_callback: Callable[[str, str], bool] | None = None,
+        metrics_store=None,     # MetricsStore | None
     ):
         """Initialize orchestrator with all collaborators."""
         self.agent = agent
@@ -102,6 +113,8 @@ class Orchestrator:
         self.ctx = context_builder
         self.pricing = pricing
         self.mcp = mcp
+        self._confirm_cb = confirm_callback
+        self.metrics = metrics_store
         # Pinned agent for the next turn only (set via /agent <name>)
         self._pinned_agent: str | None = None
         # RAG mode — "off" | "base" | "filter"; set at REPL startup if index exists
@@ -350,6 +363,14 @@ class Orchestrator:
             "pre_violations": pre_violations,
             "tool_results": tool_results_data,  # for CLI consumers (reminder poller etc.)
         }
+
+        # Persist metrics
+        if self.metrics is not None:
+            self.metrics.record("reply", {
+                k: v for k, v in metrics.items()
+                if k not in ("tool_results", "pre_violations")
+            })
+
         return text, metrics
 
     def run_step(self) -> tuple[str, dict]:
@@ -538,6 +559,31 @@ class Orchestrator:
         if self.rag_mode != "off":
             tools.append(_DOCUMENT_SEARCH_TOOL)
 
+        # Subagent delegation tools: only for primary agents
+        if spec.mode == "primary":
+            for sub in self.registry.list_all():
+                if sub.mode != "subagent":
+                    continue
+                tools.append({
+                    "type": "function",
+                    "name": f"delegate_{sub.name}",
+                    "description": (
+                        f"Delegate a task to the '{sub.name}' subagent. "
+                        f"{sub.description} "
+                        f"Use when: {sub.when_to_use}"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": "The task or question for the subagent",
+                            },
+                        },
+                        "required": ["task"],
+                    },
+                })
+
         return tools
 
     def _execute_tool_call(self, tc_item: dict) -> tuple[str, str | None, dict]:
@@ -554,6 +600,20 @@ class Orchestrator:
             arguments = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
         except json.JSONDecodeError:
             arguments = {}
+
+        # Sandbox check: confirm dangerous tool calls with the user
+        safety = _TOOL_SAFETY.get(tool_name, "safe")
+        if safety == "dangerous" and self._confirm_cb:
+            desc = f"{tool_name}({json.dumps(arguments, ensure_ascii=False)[:200]})"
+            if not self._confirm_cb(tool_name, desc):
+                return f"User denied execution of '{tool_name}'.", None, {}
+
+        # Handle subagent delegation
+        if tool_name.startswith("delegate_"):
+            agent_name = tool_name.removeprefix("delegate_")
+            task = arguments.get("task", "")
+            result = self._call_subagent(agent_name, task)
+            return json.dumps(result, ensure_ascii=False), None, result
 
         # Handle local RAG document search
         if tool_name == "document_search":
@@ -807,6 +867,39 @@ class Orchestrator:
             payload["max_output_tokens"] = ag.max_output_tokens
 
         return ag._post(payload)
+
+    # ---------------- Subagent delegation ----------------
+
+    def _call_subagent(self, spec_name: str, task: str) -> dict:
+        """Call a subagent with fresh, isolated context.
+
+        Returns {"status": "ok"|"error", "result": "...", "agent": "<name>"}.
+        """
+        spec = self.registry.get(spec_name)
+        if spec is None:
+            return {"status": "error", "result": f"Subagent '{spec_name}' not found", "agent": spec_name}
+
+        ag = self.agent
+        print(f"[SUBAGENT] Calling '{spec.name}' ...", file=sys.stderr)
+
+        # Build fresh context using the subagent's own ContextPolicy
+        prompt = self.ctx.build(spec, task, ag.tc, ag.stm, ag.ltm, ag.facts)
+
+        payload: dict = {"model": spec.model, "input": prompt}
+        if spec.temperature is not None:
+            payload["temperature"] = spec.temperature
+
+        try:
+            data, elapsed = ag._post(payload)
+            if isinstance(data, dict) and data.get("error"):
+                err = data["error"]
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                return {"status": "error", "result": msg, "agent": spec.name}
+            text = _extract_text(data)
+            print(f"[SUBAGENT] '{spec.name}' done ({elapsed:.1f}s)", file=sys.stderr)
+            return {"status": "ok", "result": text, "agent": spec.name}
+        except Exception as e:
+            return {"status": "error", "result": str(e), "agent": spec.name}
 
     # ---------------- Internals ----------------
 

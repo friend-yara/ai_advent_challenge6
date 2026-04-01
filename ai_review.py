@@ -279,6 +279,93 @@ def post_github_comment(repo: str, pr_number: int, body: str) -> None:
         print(f"[ERROR] GitHub comment failed {r.status_code}: {r.text[:200]}", file=sys.stderr)
 
 
+# ---------------- ReviewPipeline (reusable from CLI) ----------------
+
+import time as _time
+
+
+class ReviewPipeline:
+    """Reusable review pipeline: diff -> context -> LLM -> output.
+
+    Can be used standalone or from the agent CLI (/review command).
+    """
+
+    def __init__(self, provider=None, model: str = "gpt-4.1-mini",
+                 max_tokens: int = 2048):
+        self.provider = provider
+        self.model = model
+        self.max_tokens = max_tokens
+
+    def run(self, diff: str, post_to_github: bool = False,
+            repo: str | None = None, pr_number: int | None = None) -> dict:
+        """Execute the full review pipeline.
+
+        Returns {"status", "review_text", "metrics": {latency, cost, ...}}.
+        """
+        start = _time.monotonic()
+        try:
+            diff = truncate_diff(diff)
+            context = get_review_context()
+            messages = build_prompt(diff, context)
+
+            # Use injected provider or create a fresh one
+            if self.provider:
+                payload = {
+                    "model": self.model,
+                    "input": messages,
+                    "temperature": 0.2,
+                    "max_output_tokens": self.max_tokens,
+                }
+                data, elapsed_llm = self.provider.post(payload, timeout=120)
+                if isinstance(data, dict) and data.get("error"):
+                    raise RuntimeError(str(data["error"]))
+                try:
+                    review_text = data["output"][0]["content"][0]["text"]
+                except (KeyError, IndexError, TypeError):
+                    raise RuntimeError(f"Unexpected API response: {data}")
+                usage = data.get("usage", {})
+            else:
+                review_text = call_llm(messages, self.model, self.max_tokens)
+                usage = {}
+
+            elapsed = _time.monotonic() - start
+
+            if post_to_github and repo and pr_number:
+                post_github_comment(repo, pr_number, review_text)
+
+            return {
+                "status": "ok",
+                "review_text": review_text,
+                "metrics": {
+                    "latency": round(elapsed, 2),
+                    "model": self.model,
+                    "in": usage.get("input_tokens", 0),
+                    "out": usage.get("output_tokens", 0),
+                },
+            }
+        except Exception as e:
+            elapsed = _time.monotonic() - start
+            return {
+                "status": "error",
+                "error": str(e),
+                "review_text": "",
+                "metrics": {"latency": round(elapsed, 2), "model": self.model},
+            }
+
+    def run_with_retry(self, diff: str, max_retries: int = 2, **kwargs) -> dict:
+        """Run pipeline with retry on failure."""
+        for attempt in range(max_retries + 1):
+            result = self.run(diff, **kwargs)
+            if result["status"] == "ok":
+                return result
+            if attempt < max_retries:
+                print(
+                    f"[REVIEW] Attempt {attempt + 1} failed: {result.get('error', '?')}, retrying...",
+                    file=sys.stderr,
+                )
+        return result
+
+
 # ---------------- Main ----------------
 
 def main() -> None:
