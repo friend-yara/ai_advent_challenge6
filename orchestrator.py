@@ -46,6 +46,7 @@ except ImportError:
 
 _TOOL_SAFETY: dict[str, str] = {
     "save_to_file": "dangerous",
+    "edit_file": "dangerous",
     "reminder": "dangerous",
     # Everything else defaults to "safe"
 }
@@ -552,8 +553,9 @@ class Orchestrator:
         """
         tools: list[dict] = []
 
-        # MCP tools: planner, assistant, support
-        if spec.name in ("planner", "assistant", "support") and self.mcp is not None:
+        # MCP tools: primary agents with tool access + subagents
+        _MCP_AGENTS = {"planner", "assistant", "support", "research", "reviewer"}
+        if spec.name in _MCP_AGENTS and self.mcp is not None:
             raw = self.mcp.all_tools_for_llm()
             if raw:
                 tools.extend(
@@ -892,14 +894,24 @@ class Orchestrator:
 
     # ---------------- Subagent delegation ----------------
 
-    def _call_subagent(self, spec_name: str, task: str) -> dict:
-        """Call a subagent with fresh, isolated context.
+    _SUBAGENT_MAX_ROUNDS = 5
 
-        Returns {"status": "ok"|"error", "result": "...", "agent": "<name>"}.
+    def _call_subagent(self, spec_name: str, task: str) -> dict:
+        """Call a subagent with fresh, isolated context and tool use loop.
+
+        The subagent can call MCP tools (grep_files, read_file, etc.)
+        autonomously for up to _SUBAGENT_MAX_ROUNDS before returning a
+        final text result.  Its context is fully isolated — no history
+        from the main dialogue leaks in, and the subagent's intermediate
+        tool results never enter the primary agent's context.
+
+        Returns {"status": "ok"|"error", "result": "...", "agent": "<name>",
+                 "tools_used": [...], "rounds": int}.
         """
         spec = self.registry.get(spec_name)
         if spec is None:
-            return {"status": "error", "result": f"Subagent '{spec_name}' not found", "agent": spec_name}
+            return {"status": "error", "result": f"Subagent '{spec_name}' not found",
+                    "agent": spec_name, "tools_used": [], "rounds": 0}
 
         ag = self.agent
         print(f"[SUBAGENT] Calling '{spec.name}' ...", file=sys.stderr)
@@ -907,21 +919,83 @@ class Orchestrator:
         # Build fresh context using the subagent's own ContextPolicy
         prompt = self.ctx.build(spec, task, ag.tc, ag.stm, ag.ltm, ag.facts)
 
+        # Build tools available to this subagent (MCP + RAG, no delegation)
+        tools_for_llm = self._build_tools_list(spec)
+
         payload: dict = {"model": spec.model, "input": prompt}
         if spec.temperature is not None:
             payload["temperature"] = spec.temperature
+        if tools_for_llm:
+            payload["tools"] = tools_for_llm
+
+        tools_used: list[str] = []
+        total_elapsed = 0.0
 
         try:
             data, elapsed = ag._post(payload)
+            total_elapsed += elapsed
+
             if isinstance(data, dict) and data.get("error"):
                 err = data["error"]
                 msg = err.get("message") if isinstance(err, dict) else str(err)
-                return {"status": "error", "result": msg, "agent": spec.name}
+                return {"status": "error", "result": msg, "agent": spec.name,
+                        "tools_used": tools_used, "rounds": 0}
+
+            # Tool use loop — isolated from main dialogue
+            output_items = data.get("output", []) if isinstance(data, dict) else []
+            tool_call_items = [
+                item for item in output_items
+                if isinstance(item, dict) and item.get("type") == "function_call"
+            ]
+
+            all_tool_results: list[tuple[dict, str]] = []
+            _round = 0
+
+            while tool_call_items and _round < self._SUBAGENT_MAX_ROUNDS:
+                _round += 1
+                for tc_item in tool_call_items:
+                    tc_name = tc_item.get("name", "")
+                    # Subagents cannot delegate to other subagents
+                    if tc_name.startswith("delegate_"):
+                        result_text = "Subagents cannot delegate to other subagents."
+                    else:
+                        result_text, _, _ = self._execute_tool_call(tc_item)
+                    all_tool_results.append((tc_item, result_text))
+                    if tc_name and tc_name not in tools_used:
+                        tools_used.append(tc_name)
+                    print(f"  [SUBAGENT:{spec.name}] round {_round} → {tc_name}",
+                          file=sys.stderr)
+
+                # Follow-up LLM call with tool results
+                data_next, elapsed_next = self._call_with_tool_results(
+                    spec, task, all_tool_results, tools_for_llm, ag
+                )
+                total_elapsed += elapsed_next
+
+                if isinstance(data_next, dict) and data_next.get("error") is not None:
+                    err = data_next.get("error") or {}
+                    msg = err.get("message") if isinstance(err, dict) else str(err)
+                    return {"status": "error", "result": msg, "agent": spec.name,
+                            "tools_used": tools_used, "rounds": _round}
+
+                data = data_next
+                output_items = data.get("output", []) if isinstance(data, dict) else []
+                tool_call_items = [
+                    item for item in output_items
+                    if isinstance(item, dict) and item.get("type") == "function_call"
+                ]
+
             text = _extract_text(data)
-            print(f"[SUBAGENT] '{spec.name}' done ({elapsed:.1f}s)", file=sys.stderr)
-            return {"status": "ok", "result": text, "agent": spec.name}
+            rounds = _round
+            print(f"[SUBAGENT] '{spec.name}' done ({total_elapsed:.1f}s, "
+                  f"{rounds} tool round(s), tools: {tools_used})",
+                  file=sys.stderr)
+            return {"status": "ok", "result": text, "agent": spec.name,
+                    "tools_used": tools_used, "rounds": rounds}
+
         except Exception as e:
-            return {"status": "error", "result": str(e), "agent": spec.name}
+            return {"status": "error", "result": str(e), "agent": spec.name,
+                    "tools_used": tools_used, "rounds": 0}
 
     # ---------------- Internals ----------------
 

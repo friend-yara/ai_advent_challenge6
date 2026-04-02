@@ -5,7 +5,7 @@ mcp/server.py — Multi-server MCP launcher.
 Starts five domain MCP servers on separate ports:
   WeatherMCPHandler   → 127.0.0.1:8001  (get_forecast, summarize_forecast)
   SchedulerMCPHandler → 127.0.0.1:8002  (reminder)
-  StorageMCPHandler   → 127.0.0.1:8003  (save_to_file, read_file)
+  StorageMCPHandler   → 127.0.0.1:8003  (save_to_file, read_file, list_files, grep_files, edit_file)
   GitMCPHandler       → 127.0.0.1:8004  (git_branch, git_log, git_diff)
   CRMMCPHandler       → 127.0.0.1:8005  (get_ticket, search_tickets, list_user_tickets)
 
@@ -142,7 +142,7 @@ class StorageMCPHandler(MCPBaseHandler):
 
     SERVER_NAME    = "local-mcp-storage"
     SERVER_VERSION = "0.1"
-    INSTRUCTIONS   = "File storage server. Tools: save_to_file, read_file."
+    INSTRUCTIONS   = "File storage server. Tools: save_to_file, read_file, list_files, grep_files, edit_file."
     TOOLS          = STORAGE_TOOLS
 
     def _get_tools(self) -> list[dict]:
